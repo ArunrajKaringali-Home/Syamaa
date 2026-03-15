@@ -165,6 +165,7 @@ def init_db():
             phone         TEXT,
             password_hash TEXT    NOT NULL,
             address       TEXT,
+            payment_mode  TEXT,
             is_active     INTEGER DEFAULT 1,
             created_at    TEXT    DEFAULT (datetime('now'))
         );
@@ -183,6 +184,11 @@ def init_db():
         );
     """
     )
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN payment_mode TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     db.commit()
 
     # Seed products from poster data
@@ -585,7 +591,7 @@ def user_logout():
 @login_required
 def user_me():
     user = query(
-        "SELECT id,name,email,phone,address,created_at FROM users WHERE id=?",
+        "SELECT id,name,email,phone,address,payment_mode,created_at FROM users WHERE id=?",
         (session["user_id"],),
         one=True,
     )
@@ -593,6 +599,95 @@ def user_me():
         return jsonify({"error": "User not found"}), 404
     return jsonify({"user": user})
 
+
+@app.route("/api/profile", methods=["GET", "POST"])
+@login_required
+def profile():
+    user = query(
+        "SELECT id,name,email,phone,address,payment_mode,created_at FROM users WHERE id=?",
+        (session["user_id"],),
+        one=True,
+    )
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if request.method == "GET":
+        return jsonify({"user": user})
+
+    data = request.get_json(silent=True) or request.form.to_dict()
+    name = (data.get("name") or "").strip() if "name" in data else user["name"]
+    if "name" in data and not name:
+        return jsonify({"error": "Name is required"}), 400
+
+    phone_input = (
+        (data.get("phone") or "").strip()
+        if "phone" in data
+        else (user.get("phone") or "")
+    )
+    address = (
+        (data.get("address") or "").strip()
+        if "address" in data
+        else (user.get("address") or "")
+    )
+    payment_mode = (
+        (data.get("payment_mode") or "").strip()
+        if "payment_mode" in data
+        else (user.get("payment_mode") or "")
+    )
+
+    if phone_input:
+        clean_phone = re.sub(r"[\s\-\+()]", "", phone_input)
+        if not validate_phone(clean_phone):
+            return jsonify({"error": "Please enter a valid 10-digit phone number"}), 400
+    else:
+        clean_phone = None
+
+    query(
+        "UPDATE users SET name=?, phone=?, address=?, payment_mode=? WHERE id=?",
+        (name, clean_phone, address or None, payment_mode or None, session["user_id"]),
+    )
+    user = query(
+        "SELECT id,name,email,phone,address,payment_mode,created_at FROM users WHERE id=?",
+        (session["user_id"],),
+        one=True,
+    )
+    return jsonify({"success": True, "user": user})
+
+
+@app.route("/api/orders/mine", methods=["GET"])
+@login_required
+def my_orders():
+    user = query(
+        "SELECT email,phone FROM users WHERE id=?",
+        (session["user_id"],),
+        one=True,
+    )
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    email = user.get("email") or ""
+    phone = user.get("phone") or ""
+    conditions = []
+    params = []
+    if email:
+        conditions.append("email=?")
+        params.append(email)
+    if phone:
+        conditions.append("phone=?")
+        params.append(phone)
+
+    if not conditions:
+        return jsonify({"orders": [], "count": 0})
+
+    sql = (
+        "SELECT id,product_name,size,fabric_choice,color_choice,"
+        "payment_method,total_amount,status,created_at "
+        "FROM orders WHERE "
+        + " OR ".join(conditions)
+        + " ORDER BY created_at DESC"
+    )
+    rows = query(sql, tuple(params))
+    return jsonify({"orders": rows, "count": len(rows)})
 
 # ─── API: Cart ────────────────────────────────────────────────
 @app.route("/api/cart", methods=["GET"])
@@ -725,7 +820,7 @@ def checkout_cart():
     data = request.get_json(silent=True) or {}
 
     user = query(
-        "SELECT id,name,email,phone,address FROM users WHERE id=? AND is_active=1",
+        "SELECT id,name,email,phone,address,payment_mode FROM users WHERE id=? AND is_active=1",
         (session["user_id"],),
         one=True,
     )
@@ -736,7 +831,7 @@ def checkout_cart():
         return jsonify({"error": "Please add your phone number in your account before checkout"}), 400
 
     address = (data.get("address") or "").strip() or (user.get("address") or "")
-    payment = data.get("payment_method") or "COD"
+    payment = data.get("payment_method") or user.get("payment_mode") or "COD"
 
     items = query(
         "SELECT * FROM cart_items WHERE user_id=? ORDER BY added_at DESC",
