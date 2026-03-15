@@ -24,6 +24,7 @@ import smtplib
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from urllib.parse import quote
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import (
@@ -88,18 +89,26 @@ def init_db():
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS products (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT    NOT NULL,
-            category    TEXT    NOT NULL,
-            style       TEXT,
-            fabric      TEXT,
-            color       TEXT,
-            features    TEXT,
-            price       TEXT    DEFAULT 'Contact for Price',
-            image_url   TEXT,
-            tag         TEXT,
-            is_active   INTEGER DEFAULT 1,
-            created_at  TEXT    DEFAULT (datetime('now'))
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id     TEXT    UNIQUE,
+            name           TEXT    NOT NULL,
+            category       TEXT    NOT NULL,
+            short_desc     TEXT,
+            description    TEXT,
+            price          TEXT    DEFAULT 'Contact for Price',
+            stock_qty      INTEGER DEFAULT 0,
+            status         TEXT    DEFAULT 'active',
+            tags           TEXT,
+            featured       INTEGER DEFAULT 0,
+            display_order  INTEGER DEFAULT 0,
+            style          TEXT,
+            fabric         TEXT,
+            color          TEXT,
+            features       TEXT,
+            image_url      TEXT,
+            tag            TEXT,
+            is_active      INTEGER DEFAULT 1,
+            created_at     TEXT    DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS enquiries (
@@ -188,6 +197,41 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN payment_mode TEXT")
     except sqlite3.OperationalError:
         pass
+
+    try:
+        db.execute("ALTER TABLE products ADD COLUMN product_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    for col, ddl in [
+        ("short_desc", "ALTER TABLE products ADD COLUMN short_desc TEXT"),
+        ("description", "ALTER TABLE products ADD COLUMN description TEXT"),
+        ("stock_qty", "ALTER TABLE products ADD COLUMN stock_qty INTEGER DEFAULT 0"),
+        ("status", "ALTER TABLE products ADD COLUMN status TEXT DEFAULT 'active'"),
+        ("tags", "ALTER TABLE products ADD COLUMN tags TEXT"),
+        ("featured", "ALTER TABLE products ADD COLUMN featured INTEGER DEFAULT 0"),
+        (
+            "display_order",
+            "ALTER TABLE products ADD COLUMN display_order INTEGER DEFAULT 0",
+        ),
+    ]:
+        try:
+            db.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+
+    rows = db.execute(
+        "SELECT id, product_id, status, stock_qty FROM products"
+    ).fetchall()
+    for row in rows:
+        if not row["product_id"]:
+            code = f"SYA{row['id']:04d}"
+            db.execute(
+                "UPDATE products SET product_id=? WHERE id=?", (code, row["id"])
+            )
+        if not row["status"]:
+            db.execute("UPDATE products SET status='active' WHERE id=?", (row["id"],))
+        if row["stock_qty"] is None:
+            db.execute("UPDATE products SET stock_qty=0 WHERE id=?", (row["id"],))
 
     db.commit()
 
@@ -338,10 +382,19 @@ def get_product(pid):
     return jsonify(p)
 
 
+@app.route("/api/public/products", methods=["GET"])
+def public_products():
+    products, _ = build_products_from_images()
+    def is_featured(value):
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    featured = [p for p in products if is_featured(p.get("featured"))]
+    return jsonify({"products": products, "featured": featured})
+
+
 @app.route("/api/products/categories", methods=["GET"])
 def get_categories():
     cats = query(
-        "SELECT DISTINCT category, COUNT(*) as count FROM products WHERE is_active=1 GROUP BY category"
+        "SELECT DISTINCT category, COUNT(*) as count FROM products WHERE is_active=1 AND status='active' GROUP BY category"
     )
     return jsonify({"categories": cats})
 
@@ -393,12 +446,13 @@ def submit_enquiry():
         (clean_phone, wa_msg, "website_enquiry"),
     )
 
+    wa_text = f"Hi! I enquired about {pname or 'your collection'}"
     return (
         jsonify(
             {
                 "success": True,
                 "message": "Thank you! We'll contact you on WhatsApp soon.",
-                "wa_link": f"https://wa.me/916282201008?text=Hi! I enquired about {pname or 'your collection'}",
+                "wa_link": f"https://wa.me/916282201008?text={quote(wa_text)}",
             }
         ),
         201,
@@ -461,7 +515,7 @@ def place_order():
             {
                 "success": True,
                 "message": "Order received! We'll confirm on WhatsApp shortly.",
-                "wa_link": f"https://wa.me/916282201008?text={wa_text}",
+                "wa_link": f"https://wa.me/916282201008?text={quote(wa_text)}",
             }
         ),
         201,
@@ -481,6 +535,9 @@ def subscribe_newsletter():
         return jsonify({"error": "Email is required"}), 400
     if not validate_email(email):
         return jsonify({"error": "Please enter a valid email address"}), 400
+
+    if not product_name:
+        return jsonify({"error": "Product name is required"}), 400
 
     existing = query("SELECT id FROM newsletter WHERE email=?", (email,), one=True)
     if existing:
@@ -682,12 +739,11 @@ def my_orders():
     sql = (
         "SELECT id,product_name,size,fabric_choice,color_choice,"
         "payment_method,total_amount,status,created_at "
-        "FROM orders WHERE "
-        + " OR ".join(conditions)
-        + " ORDER BY created_at DESC"
+        "FROM orders WHERE " + " OR ".join(conditions) + " ORDER BY created_at DESC"
     )
     rows = query(sql, tuple(params))
     return jsonify({"orders": rows, "count": len(rows)})
+
 
 # ─── API: Cart ────────────────────────────────────────────────
 @app.route("/api/cart", methods=["GET"])
@@ -705,27 +761,42 @@ def get_cart():
 def add_to_cart():
     data = request.get_json(silent=True) or request.form.to_dict()
 
-    product_id = data.get("product_id")
+    product_id_raw = data.get("product_id")
     product_name = (data.get("product_name") or "").strip()
     quantity = int(data.get("quantity") or 1)
     size = (data.get("size") or "").strip()
     notes = (data.get("notes") or "").strip()
 
-    if not product_name:
-        return jsonify({"error": "Product name is required"}), 400
     if quantity < 1:
         return jsonify({"error": "Quantity must be at least 1"}), 400
 
     # If product_id given, fetch latest details
     price = "Contact for Price"
     image_url = None
-    if product_id:
-        p = query(
-            "SELECT price,image_url FROM products WHERE id=?", (product_id,), one=True
-        )
+    product_id = None
+    if product_id_raw:
+        pid_str = str(product_id_raw).strip()
+        if pid_str.isdigit():
+            p = query(
+                "SELECT id,product_id,name,price,image_url FROM products WHERE id=?",
+                (int(pid_str),),
+                one=True,
+            )
+        else:
+            p = query(
+                "SELECT id,product_id,name,price,image_url FROM products WHERE product_id=?",
+                (product_code(pid_str),),
+                one=True,
+            )
         if p:
+            product_id = p["id"]
             price = p["price"]
             image_url = p["image_url"]
+            if not product_name:
+                product_name = p["name"]
+
+    if not product_name:
+        return jsonify({"error": "Product name is required"}), 400
 
     # Check if same product+size already in cart → increment quantity
     existing = query(
@@ -735,7 +806,9 @@ def add_to_cart():
     )
     if existing:
         new_qty = existing["quantity"] + quantity
-        query("UPDATE cart_items SET quantity=? WHERE id=?", (new_qty, existing["id"]))
+        query(
+            "UPDATE cart_items SET quantity=? WHERE id=?", (new_qty, existing["id"])
+        )
         return jsonify(
             {"success": True, "message": "Cart updated ✦", "action": "updated"}
         )
@@ -784,7 +857,9 @@ def update_cart_item(item_id):
     if quantity is not None:
         if int(quantity) < 1:
             return jsonify({"error": "Quantity must be at least 1"}), 400
-        query("UPDATE cart_items SET quantity=? WHERE id=?", (int(quantity), item_id))
+        query(
+            "UPDATE cart_items SET quantity=? WHERE id=?", (int(quantity), item_id)
+        )
     if size is not None:
         query("UPDATE cart_items SET size=? WHERE id=?", (size, item_id))
     if notes is not None:
@@ -828,7 +903,14 @@ def checkout_cart():
         return jsonify({"error": "User not found"}), 404
 
     if not user.get("phone"):
-        return jsonify({"error": "Please add your phone number in your account before checkout"}), 400
+        return (
+            jsonify(
+                {
+                    "error": "Please add your phone number in your account before checkout"
+                }
+            ),
+            400,
+        )
 
     address = (data.get("address") or "").strip() or (user.get("address") or "")
     payment = data.get("payment_method") or user.get("payment_mode") or "COD"
@@ -870,8 +952,9 @@ def checkout_cart():
 
     query("DELETE FROM cart_items WHERE user_id=?", (session["user_id"],))
 
-    return jsonify({"success": True, "message": f"Order placed for {len(items)} item(s)"})
-
+    return jsonify(
+        {"success": True, "message": f"Order placed for {len(items)} item(s)"}
+    )
 
 
 # ─── Admin: Auth ──────────────────────────────────────────────
@@ -1006,71 +1089,190 @@ def update_order(oid):
 @admin_required
 def admin_products():
     rows = query("SELECT * FROM products ORDER BY id DESC")
-    return jsonify({"products": rows})
+    image_map = scan_image_library()
+    products = []
+    for row in rows:
+        item = dict(row)
+        pid = product_code(item.get("product_id")) or f"SYA{item['id']:04d}"
+        item["product_id"] = pid
+        images = image_map.get(pid, [])
+        item["image_count"] = len(images)
+        item["has_poster"] = any(
+            img.split("/")[-1].lower().startswith("poster") for img in images
+        )
+        products.append(item)
+    return jsonify({"products": products})
+
 
 
 @app.route("/admin/api/products", methods=["POST"])
 @admin_required
 def admin_add_product():
     data = request.get_json(silent=True) or request.form.to_dict()
+    product_id = (data.get("product_id") or "").strip().upper()
     if not data.get("name") or not data.get("category"):
         return jsonify({"error": "Name and category are required"}), 400
+    if not re.match(r"^SYA\d{4}$", product_id):
+        return jsonify({"error": "Product ID must be like SYA0001"}), 400
+    existing = query(
+        "SELECT id FROM products WHERE product_id=?", (product_id,), one=True
+    )
+    if existing:
+        return jsonify({"error": "Product ID already exists"}), 400
+
     features = (
         "|".join(data.get("features", []))
         if isinstance(data.get("features"), list)
         else (data.get("features") or "")
     )
+
+    status = (data.get("status") or "active").lower()
+    if status not in ("active", "draft", "hidden"):
+        return jsonify({"error": "Invalid status"}), 400
+    featured = (
+        1 if str(data.get("featured")).lower() in ("1", "true", "yes", "on") else 0
+    )
+
     query(
-        "INSERT INTO products (name,category,style,fabric,color,features,price,image_url,tag) VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO products (product_id,name,category,short_desc,description,price,stock_qty,status,tags,featured,display_order,style,fabric,color,features,tag)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
+            product_id,
             data["name"],
             data["category"],
+            data.get("short_desc"),
+            data.get("description"),
+            data.get("price") or "Contact for Price",
+            int(data.get("stock_qty") or 0),
+            status,
+            data.get("tags"),
+            featured,
+            int(data.get("display_order") or 0),
             data.get("style"),
             data.get("fabric"),
             data.get("color"),
             features,
-            data.get("price", "Contact for Price"),
-            data.get("image_url"),
             data.get("tag"),
         ),
     )
-    return jsonify({"success": True}), 201
+    ensure_product_folder(product_id)
+    return jsonify({"success": True})
 
 
 @app.route("/admin/api/products/<int:pid>", methods=["PUT"])
 @admin_required
 def admin_update_product(pid):
     data = request.get_json(silent=True) or {}
+    existing = query(
+        "SELECT id, product_id FROM products WHERE id=?", (pid,), one=True
+    )
+    if not existing:
+        return jsonify({"error": "Product not found"}), 404
+    existing_pid = product_code(existing.get("product_id"))
+    product_id = (data.get("product_id") or "").strip().upper()
+
+    if existing_pid:
+        if product_id and product_id != existing_pid:
+            return jsonify({"error": "Product ID is immutable once set"}), 400
+        product_id = None
+    else:
+        if product_id and not re.match(r"^SYA\d{4}$", product_id):
+            return jsonify({"error": "Product ID must be like SYA0001"}), 400
+        if product_id:
+            existing_check = query(
+                "SELECT id FROM products WHERE product_id=? AND id!=?",
+                (product_id, pid),
+                one=True,
+            )
+            if existing_check:
+                return jsonify({"error": "Product ID already exists"}), 400
+
     features = (
         "|".join(data.get("features", []))
         if isinstance(data.get("features"), list)
         else data.get("features", "")
     )
+    status = (data.get("status") or "active").lower()
+    if status not in ("active", "draft", "hidden"):
+        return jsonify({"error": "Invalid status"}), 400
+    featured = (
+        1 if str(data.get("featured")).lower() in ("1", "true", "yes", "on") else 0
+    )
     query(
-        """UPDATE products SET name=?,category=?,style=?,fabric=?,color=?,
-           features=?,price=?,image_url=?,tag=?,is_active=? WHERE id=?""",
+        """UPDATE products SET
+           product_id=COALESCE(?, product_id),
+           name=?,
+           category=?,
+           short_desc=?,
+           description=?,
+           price=?,
+           stock_qty=?,
+           status=?,
+           tags=?,
+           featured=?,
+           display_order=?,
+           style=?,
+           fabric=?,
+           color=?,
+           features=?,
+           tag=?,
+           is_active=?
+           WHERE id=?""",
         (
+            product_id or None,
             data.get("name"),
             data.get("category"),
+            data.get("short_desc"),
+            data.get("description"),
+            data.get("price", "Contact for Price"),
+            int(data.get("stock_qty") or 0),
+            status,
+            data.get("tags"),
+            featured,
+            int(data.get("display_order") or 0),
             data.get("style"),
             data.get("fabric"),
             data.get("color"),
             features,
-            data.get("price", "Contact for Price"),
-            data.get("image_url"),
             data.get("tag"),
             int(data.get("is_active", 1)),
             pid,
         ),
     )
+    if product_id:
+        ensure_product_folder(product_id)
     return jsonify({"success": True})
+
 
 
 @app.route("/admin/api/products/<int:pid>", methods=["DELETE"])
 @admin_required
 def admin_delete_product(pid):
-    query("UPDATE products SET is_active=0 WHERE id=?", (pid,))
-    return jsonify({"success": True})
+    hard = request.args.get("hard") in {"1", "true", "yes"}
+    if hard:
+        query("DELETE FROM cart_items WHERE product_id=?", (pid,))
+        query("UPDATE enquiries SET product_id=NULL WHERE product_id=?", (pid,))
+        query("DELETE FROM products WHERE id=?", (pid,))
+        return jsonify({"success": True, "deleted": True})
+    query("UPDATE products SET is_active=0,status='hidden' WHERE id=?", (pid,))
+    return jsonify({"success": True, "deleted": False})
+
+
+@app.route("/admin/api/product-images/<pid>")
+@admin_required
+def admin_product_images(pid):
+    normalized = product_id_from_code(pid) or (pid or "").strip().upper()
+    if not re.match(r"^SYA\d{4}$", normalized):
+        return jsonify({"error": "Invalid product ID"}), 400
+    image_map = scan_image_library()
+    images = image_map.get(normalized, [])
+    return jsonify(
+        {
+            "product_id": normalized,
+            "images": images,
+            "poster": images[0] if images else None,
+        }
+    )
 
 
 @app.route("/admin/api/newsletter")
@@ -1110,6 +1312,868 @@ def admin_stats():
     )
 
 
+def product_code(product_id):
+    if not product_id:
+        return None
+    return str(product_id).strip().upper()
+
+
+def product_id_from_code(code):
+    if not code:
+        return None
+    if code.isdigit():
+        return f"SYA{int(code):04d}"
+    m = re.match(r"^SYA(\d{4})$", code.upper())
+    if not m:
+        return None
+    return code.upper()
+
+
+IMAGE_ROOT = BASE_DIR / "instance" / "images"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_image_cache = {"mtime": 0, "file_count": 0, "by_id": {}}
+
+def ensure_product_folder(product_id):
+    if not product_id:
+        return
+    try:
+        (IMAGE_ROOT / product_id).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
+
+def scan_image_library():
+    root = IMAGE_ROOT
+    if not root.exists():
+        return {}
+
+    latest_mtime = 0
+    file_count = 0
+    for dirpath, _, filenames in os.walk(root):
+        try:
+            latest_mtime = max(latest_mtime, Path(dirpath).stat().st_mtime)
+        except OSError:
+            pass
+        for fname in filenames:
+            if fname.endswith(".Zone.Identifier") or fname.startswith("."):
+                continue
+            ext = Path(fname).suffix.lower()
+            if ext not in IMAGE_EXTS:
+                continue
+            file_count += 1
+            try:
+                mtime = (Path(dirpath) / fname).stat().st_mtime
+                latest_mtime = max(latest_mtime, mtime)
+            except OSError:
+                continue
+
+    if (
+        latest_mtime
+        and latest_mtime == _image_cache["mtime"]
+        and file_count == _image_cache["file_count"]
+    ):
+        return _image_cache["by_id"]
+
+    by_id = {}
+    for dirpath, _, filenames in os.walk(root):
+        rel = Path(dirpath).relative_to(root)
+        parts = [p for p in rel.parts if p]
+        if not parts:
+            continue
+        pid = None
+        for part in parts:
+            if re.match(r"^SYA\d{4}$", part.upper()):
+                pid = part.upper()
+                break
+        if not pid:
+            continue
+        images = []
+        for fname in sorted(filenames):
+            if fname.endswith(".Zone.Identifier") or fname.startswith("."):
+                continue
+            ext = Path(fname).suffix.lower()
+            if ext not in IMAGE_EXTS:
+                continue
+            rel_file = (Path(dirpath).relative_to(root) / fname).as_posix()
+            images.append("/media/" + rel_file)
+        if not images:
+            continue
+        poster = [img for img in images if Path(img).name.lower().startswith("poster")]
+        others = [img for img in images if img not in poster]
+        images = poster + others
+        existing = by_id.get(pid, [])
+        for img in images:
+            if img not in existing:
+                existing.append(img)
+        by_id[pid] = existing
+
+    _image_cache["mtime"] = latest_mtime
+    _image_cache["file_count"] = file_count
+    _image_cache["by_id"] = by_id
+    return by_id
+
+
+def svg_placeholder(title, subtitle="Syamaa Couture"):
+    svg = f"""
+<svg xmlns='http://www.w3.org/2000/svg' width='900' height='1200' viewBox='0 0 900 1200'>
+  <defs>
+    <linearGradient id='g' x1='0' x2='1' y1='0' y2='1'>
+      <stop offset='0%' stop-color='#25120B'/>
+      <stop offset='100%' stop-color='#5B2B1B'/>
+    </linearGradient>
+  </defs>
+  <rect width='900' height='1200' fill='url(#g)'/>
+  <rect x='60' y='80' width='780' height='1040' rx='36' fill='rgba(255,255,255,0.03)' stroke='rgba(201,144,12,0.3)'/>
+  <text x='90' y='180' fill='#F0C040' font-family='Cormorant Garamond, serif' font-size='48'>{title}</text>
+  <text x='90' y='240' fill='rgba(242,213,176,0.7)' font-family='Josefin Sans, sans-serif' font-size='20' letter-spacing='4'>{subtitle}</text>
+  <text x='90' y='1060' fill='rgba(242,213,176,0.6)' font-family='Josefin Sans, sans-serif' font-size='14' letter-spacing='3'>SYAMAA SIGNATURE</text>
+</svg>
+"""
+    return "data:image/svg+xml;utf8," + quote(svg)
+
+
+def product_description(product):
+    if product.get("features"):
+        return product["features"].replace("|", ", ")
+    return "Boutique-crafted silhouette with artisanal finishing."
+
+
+def build_products_from_images():
+    image_map = scan_image_library()
+    rows = query(
+        "SELECT * FROM products WHERE is_active=1 OR is_active IS NULL ORDER BY display_order ASC, id DESC"
+    )
+    products = []
+    by_pid = {}
+
+    for p in rows:
+        item = dict(p)
+        status = str(item.get("status") or "active").strip().lower()
+        item["status"] = status
+        if status != "active":
+            continue
+        # Treat NULL is_active as active to preserve legacy rows
+        is_active = item.get("is_active")
+        if is_active in (0, "0", False):
+            continue
+        pid = product_code(item.get("product_id")) or f"SYA{item['id']:04d}"
+        item["product_id"] = pid
+        images = image_map.get(pid, [])
+        if images:
+            item["image"] = images[0]
+            item["images"] = images
+        else:
+            item["image"] = svg_placeholder(item.get("name", "Syamaa"))
+            item["images"] = [item["image"]]
+        products.append(item)
+        by_pid[pid] = item
+
+    return products, by_pid
+
+
+PRODUCTS_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Syamaa | All Products</title>
+<link href="https://fonts.googleapis.com/css2...family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root { --dark:#1A0F0A; --gold:#C9900C; --gold-light:#F0C040; --cream:#FAF3E8; --blush:#F2D5B0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { min-height:100vh; background:#120906; color:var(--cream); font-family:'Josefin Sans',sans-serif; }
+  a { color:inherit; text-decoration:none; }
+  .page { max-width:1200px; margin:0 auto; padding:48px 24px 80px; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; }
+  .brand { font-family:'Cormorant Garamond',serif; font-size:36px; color:var(--gold-light); letter-spacing:1px; }
+  .back-link { font-size:12px; letter-spacing:0.3em; text-transform:uppercase; color:rgba(242,213,176,0.7); }
+  .hero { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:28px; }
+  .hero h1 { font-family:'Cormorant Garamond',serif; font-size:42px; font-weight:300; }
+  .hero p { max-width:520px; line-height:1.6; color:rgba(242,213,176,0.7); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:24px; }
+  .card { position:relative; border:1px solid rgba(201,144,12,0.2); background:rgba(255,255,255,0.02); padding:16px; border-radius:18px; transition:transform 0.3s, border-color 0.3s, box-shadow 0.3s; }
+  .card:hover { transform:translateY(-6px); border-color:rgba(201,144,12,0.5); box-shadow:0 20px 40px rgba(0,0,0,0.25); }
+  .card img { width:100%; border-radius:14px; aspect-ratio:3/4; object-fit:cover; }
+  .wishlist { position:absolute; top:18px; right:18px; border:1px solid rgba(201,144,12,0.4); background:rgba(20,10,6,0.8); color:var(--gold-light); width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; }
+  .card .meta { display:flex; justify-content:space-between; margin-top:12px; font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7); }
+  .card h3 { margin-top:8px; font-family:'Cormorant Garamond',serif; font-size:20px; font-weight:300; }
+  .price { margin-top:6px; font-size:14px; color:var(--gold-light); letter-spacing:0.12em; text-transform:uppercase; }
+  .card-actions { margin-top:12px; display:flex; gap:10px; }
+  .btn { padding:10px 14px; border-radius:999px; text-transform:uppercase; letter-spacing:0.2em; font-size:10px; border:1px solid rgba(201,144,12,0.4); }
+  .btn-primary { background:var(--gold); color:#120906; border:none; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="brand">Syamaa</div>
+      <a class="back-link" href="/">Back to Home</a>
+    </div>
+    <div class="hero">
+      <div>
+        <h1>All Products</h1>
+        <p>Explore every silhouette in our atelier. Each product has a dedicated ID, price, and a full detail page with multiple views.</p>
+      </div>
+      <div class="price">{{ products|length }} Styles</div>
+    </div>
+
+    <div class="grid">
+      {% for p in products %}
+      <a class="card" href="/product/{{ p.product_id }}">
+        <span class="wishlist">...</span>
+        <img src="{{ p.image }}" alt="{{ p.name }}" loading="lazy">
+        <div class="meta">
+          <span>{{ p.product_id }}</span>
+          <span>{{ p.category }}</span>
+        </div>
+        <h3>{{ p.name }}</h3>
+        <div class="price">{{ p.price or 'Contact for Price' }}</div>
+        <div class="card-actions">
+          <span class="btn">Quick View</span>
+          <span class="btn btn-primary">View Details</span>
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+PRODUCT_DETAIL_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ product.name }} | Syamaa</title>
+<link href="https://fonts.googleapis.com/css2...family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root { --dark:#1A0F0A; --gold:#C9900C; --gold-light:#F0C040; --cream:#FAF3E8; --blush:#F2D5B0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { min-height:100vh; background:#120906; color:var(--cream); font-family:'Josefin Sans',sans-serif; }
+  a { color:inherit; text-decoration:none; }
+  .page { max-width:1100px; margin:0 auto; padding:48px 24px 80px; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; }
+  .brand { font-family:'Cormorant Garamond',serif; font-size:36px; color:var(--gold-light); letter-spacing:1px; }
+  .breadcrumbs { font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7); }
+  .content { display:grid; grid-template-columns:1.1fr 0.9fr; gap:36px; }
+  .gallery-main { width:100%; border-radius:22px; border:1px solid rgba(201,144,12,0.3); aspect-ratio:3/4; object-fit:cover; background:#1A0F0A; transition: opacity 0.25s ease; }
+  .thumbs { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px; overflow-x:auto; }
+  .thumbs img { width:100%; border-radius:14px; aspect-ratio:3/4; object-fit:cover; cursor:pointer; border:1px solid transparent; }
+  .thumbs img.active { border-color:rgba(201,144,12,0.7); }
+  .zoom { overflow:hidden; border-radius:22px; }
+  .zoom img { transition:transform 0.4s ease; }
+  .zoom:hover img { transform:scale(1.05); }
+  .info h1 { font-family:'Cormorant Garamond',serif; font-size:38px; font-weight:300; }
+  .info .meta { margin-top:12px; font-size:12px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7); display:flex; gap:18px; flex-wrap:wrap; }
+  .price { margin-top:14px; font-size:16px; color:var(--gold-light); letter-spacing:0.15em; text-transform:uppercase; }
+  .chips { margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; }
+  .chip { border:1px solid rgba(201,144,12,0.3); padding:6px 10px; border-radius:999px; font-size:11px; letter-spacing:0.15em; text-transform:uppercase; }
+  .desc { margin-top:18px; line-height:1.7; color:rgba(242,213,176,0.7); }
+  .actions { margin-top:22px; display:flex; gap:12px; flex-wrap:wrap; }
+  .btn { padding:12px 18px; border-radius:999px; text-transform:uppercase; letter-spacing:0.2em; font-size:11px; border:1px solid rgba(201,144,12,0.4); }
+  .btn-primary { background:var(--gold); color:#120906; border:none; }
+  .related { margin-top:46px; }
+  .related h2 { font-family:'Cormorant Garamond',serif; font-size:28px; font-weight:300; margin-bottom:16px; }
+  .related-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:16px; }
+  .related-card { border:1px solid rgba(201,144,12,0.2); background:rgba(255,255,255,0.02); padding:12px; border-radius:16px; }
+  .related-card img { width:100%; border-radius:12px; aspect-ratio:3/4; object-fit:cover; }
+  .toast { position:fixed; bottom:24px; right:24px; background:#1A0F0A; border:1px solid rgba(201,144,12,0.4); color:var(--cream); padding:12px 16px; border-radius:12px; display:none; }
+
+  .modal-overlay { position:fixed; inset:0; background:rgba(10,6,4,0.75); backdrop-filter: blur(6px); display:flex; align-items:center; justify-content:center; opacity:0; pointer-events:none; transition:opacity 0.3s ease; z-index:2000; padding:24px 16px; }
+  .modal-overlay.open { opacity:1; pointer-events:auto; }
+  .modal { width:min(720px, 92vw); background:#120906; border:1px solid rgba(201,144,12,0.35); padding:30px; border-radius:22px; position:relative; max-height:92vh; overflow:visible; box-shadow:0 40px 100px rgba(0,0,0,0.5); transform:translateY(22px) scale(0.98); transition:transform 0.35s ease, box-shadow 0.35s ease; }
+  .modal-overlay.open .modal { transform:translateY(0) scale(1); }
+  .modal-scroll { max-height:min(70vh, 520px); overflow-y:auto; padding-right:6px; -webkit-overflow-scrolling: touch; }
+  .modal-scroll::-webkit-scrollbar { width:6px; }
+  .modal-scroll::-webkit-scrollbar-thumb { background: rgba(201,144,12,0.35); border-radius:999px; }
+  .modal-close { position:absolute; top:14px; right:14px; background:none; border:1px solid rgba(201,144,12,0.4); color:var(--gold-light); width:32px; height:32px; border-radius:50%; cursor:pointer; }
+  .modal-title { font-family:'Cormorant Garamond',serif; font-size:26px; font-weight:300; }
+  .modal-product-name { margin-top:6px; font-size:12px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7); }
+  .modal-tabs { display:flex; gap:10px; margin-top:18px; }
+  .modal-tab { flex:1; padding:10px; border:1px solid rgba(201,144,12,0.3); background:transparent; color:var(--blush); text-transform:uppercase; letter-spacing:0.2em; font-size:10px; cursor:pointer; }
+  .modal-tab.active { background:var(--gold); color:#120906; border-color:var(--gold); }
+  .modal-form { margin-top:16px; display:flex; flex-direction:column; gap:14px; }
+  .field { display:flex; flex-direction:column; gap:6px; }
+  .field-label { font-size:10px; letter-spacing:0.24em; text-transform:uppercase; color:rgba(242,213,176,0.6); }
+  .field-hint { font-size:11px; color:rgba(242,213,176,0.45); }
+  .modal-form input, .modal-form textarea, .modal-form select { background:rgba(255,255,255,0.02); border:1px solid rgba(201,144,12,0.25); padding:12px 14px; color:var(--cream); font-family:'Josefin Sans'; font-size:12px; outline:none; border-radius:12px; transition:border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+  .modal-form input:hover, .modal-form textarea:hover, .modal-form select:hover { border-color: rgba(201,144,12,0.45); }
+  .modal-form input:focus, .modal-form textarea:focus, .modal-form select:focus { border-color:var(--gold); box-shadow:0 0 0 2px rgba(201,144,12,0.15); background:rgba(255,255,255,0.03); }
+  .select-field { position:relative; }
+  .modal-form select { appearance:none; background-image: linear-gradient(45deg, transparent 50%, rgba(240,192,64,0.85) 50%), linear-gradient(135deg, rgba(240,192,64,0.85) 50%, transparent 50%); background-position: calc(100% - 18px) 50%, calc(100% - 12px) 50%; background-size:6px 6px; background-repeat:no-repeat; padding-right:34px; cursor:pointer; }
+  .modal-form select option { background:#120906; color:var(--cream); }
+  .modal-form textarea { min-height:90px; resize:vertical; }
+  .form-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .modal-submit { margin-top:4px; background:var(--gold); color:#120906; border:none; padding:12px 16px; text-transform:uppercase; letter-spacing:0.2em; font-size:10px; border-radius:999px; cursor:pointer; }
+  .modal-feedback { font-size:11px; color:var(--blush); opacity:0.8; }
+  .wa-followup { font-size:11px; color:#80F2A0; }
+  @media (prefers-reduced-motion: reduce) {
+    .modal, .modal-overlay { transition:none; }
+  }
+  @media (max-width: 640px) {
+    .form-row { grid-template-columns:1fr; }
+  }
+
+  @media (max-width: 900px) {
+    .content { grid-template-columns:1fr; }
+    .thumbs { grid-template-columns:repeat(3, minmax(140px,1fr)); }
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <div class="brand">Syamaa</div>
+      <div class="breadcrumbs">
+        <a href="/">Home</a> / <a href="/products">Collection</a> / {{ display_id }}
+      </div>
+    </div>
+    <div class="content">
+      <div>
+        <div class="zoom">
+          <img id="mainImage" class="gallery-main" src="{{ gallery[0] }}" alt="{{ product.name }}">
+        </div>
+        <div class="thumbs">
+          {% for img in gallery %}
+          <img src="{{ img }}" alt="{{ product.name }} view" onclick="setImage('{{ img }}', this)" class="{% if loop.index0 == 0 %}active{% endif %}">
+          {% endfor %}
+        </div>
+      </div>
+      <div class="info">
+        <h1>{{ product.name }}</h1>
+        <div class="meta">
+          <span>ID: {{ display_id }}</span>
+          <span>{{ product.category }}</span>
+          <span>{{ product.style }}</span>
+          <span>{{ 'In Stock' if (product.stock_qty or 0) > 0 else 'Out of Stock' }}</span>
+        </div>
+        <div class="price">{{ product.price or 'Contact for Price' }}</div>
+        <div class="chips">
+          {% if product.fabric %}<span class="chip">{{ product.fabric }}</span>{% endif %}
+          {% if product.color %}<span class="chip">{{ product.color }}</span>{% endif %}
+          {% if product.tag %}<span class="chip">{{ product.tag }}</span>{% endif %}
+        </div>
+        {% if product.short_desc %}<div class="desc">{{ product.short_desc }}</div>{% endif %}
+        <div class="desc">{{ description }}</div>
+        <div class="actions">
+          <button class="btn" onclick="openEnquiry('{{ product.name }}','{{ display_id }}')">Enquire or Order</button>
+          <button class="btn btn-primary" onclick="openOrder('{{ product.name }}','{{ display_id }}')">Place Order</button>
+          <button class="btn" onclick="addToCart('{{ product.name }}','{{ display_id }}')">Add to Cart</button>
+          <a class="btn" href="/products">View All Products</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="related">
+      <h2>Related Products</h2>
+      <div class="related-grid">
+        {% for r in related %}
+        <a class="related-card" href="/product/{{ r.product_id }}">
+          <img src="{{ r.image }}" alt="{{ r.name }}" loading="lazy">
+          <div class="meta" style="margin-top:8px; font-size:10px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7);">{{ r.product_id }}</div>
+          <div style="margin-top:6px; font-family:'Cormorant Garamond',serif; font-size:16px;">{{ r.name }}</div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button class="modal-close" onclick="closeModal()" aria-label="Close">X</button>
+      <h2 class="modal-title" id="modalTitle">Enquire or <em style="color:var(--gold-light,#F0C040);font-style:italic;">Order</em></h2>
+      <div class="modal-product-name" id="modalProductDisplay"></div>
+
+      <div class="modal-tabs">
+        <button class="modal-tab active" id="tabEnquiry" onclick="switchTab('enquiry')">Quick Enquiry</button>
+        <button class="modal-tab" id="tabOrder" onclick="switchTab('order')">Place Order</button>
+        <button class="modal-tab" id="tabCart" onclick="switchTab('cart')">Add to Cart</button>
+      </div>
+
+      <div class="modal-scroll">
+        <div id="formEnquiry" class="modal-form">
+          <div class="field">
+            <label class="field-label" for="enq-name">Name</label>
+            <input type="text" id="enq-name" placeholder="Your Name *" required>
+          </div>
+          <div class="field">
+            <label class="field-label" for="enq-phone">WhatsApp Number</label>
+            <input type="tel" id="enq-phone" placeholder="WhatsApp Number * (e.g. 9876543210)" required>
+          </div>
+          <div class="field">
+            <label class="field-label" for="enq-email">Email</label>
+            <input type="email" id="enq-email" placeholder="Email (optional)">
+          </div>
+          <div class="field">
+            <label class="field-label" for="enq-msg">Message</label>
+            <textarea id="enq-msg" placeholder="What would you like to know..."></textarea>
+          </div>
+          <button class="modal-submit" onclick="submitEnquiry()">Send Enquiry</button>
+          <div class="modal-feedback" id="enq-feedback" role="status" aria-live="polite"></div>
+          <div class="wa-followup" id="enq-wa"></div>
+        </div>
+
+        <div id="formOrder" class="modal-form" style="display:none;">
+          <div class="form-row">
+            <div class="field">
+              <label class="field-label" for="ord-name">Name</label>
+              <input type="text" id="ord-name" placeholder="Your Name *" required>
+            </div>
+            <div class="field">
+              <label class="field-label" for="ord-phone">WhatsApp Number</label>
+              <input type="tel" id="ord-phone" placeholder="WhatsApp Number *" required>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="ord-email">Email</label>
+            <input type="email" id="ord-email" placeholder="Email (optional)">
+          </div>
+          <div class="field">
+            <label class="field-label" for="ord-address">Delivery Address</label>
+            <input type="text" id="ord-address" placeholder="Delivery Address">
+          </div>
+          <div class="form-row">
+            <div class="field">
+              <label class="field-label" for="ord-size">Size</label>
+              <div class="select-field">
+                <select id="ord-size" required>
+                  <option value="">Select Size</option>
+                  <option>XS</option>
+                  <option>S</option>
+                  <option>M</option>
+                  <option>L</option>
+                  <option>XL</option>
+                  <option>XXL</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="ord-fabric">Fabric</label>
+              <div class="select-field">
+                <select id="ord-fabric" required>
+                  <option value="">Fabric Preference</option>
+                  <option>Cotton</option>
+                  <option>Cotton-Silk</option>
+                  <option>Jaipur Cotton</option>
+                  <option>Linen Blend</option>
+                  <option>Silk</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field">
+              <label class="field-label" for="ord-color">Color Preference</label>
+              <div class="select-field">
+                <select id="ord-color">
+                  <option value="">Color Preference</option>
+                  <option>Rose</option>
+                  <option>Ivory</option>
+                  <option>Navy</option>
+                  <option>Maroon</option>
+                  <option>Teal</option>
+                  <option>Mustard</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="ord-pay">Payment Method</label>
+              <div class="select-field">
+                <select id="ord-pay">
+                  <option value="COD">Cash on Delivery</option>
+                  <option value="UPI">UPI</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="ord-notes">Stitch Notes</label>
+            <textarea id="ord-notes" placeholder="Custom notes (measurements, neck, sleeve, etc.)"></textarea>
+          </div>
+          <button class="modal-submit" onclick="submitOrder()">Place Order</button>
+          <div class="modal-feedback" id="ord-feedback" role="status" aria-live="polite"></div>
+          <div class="wa-followup" id="ord-wa"></div>
+        </div>
+
+        <div id="formCart" class="modal-form" style="display:none;">
+          <div class="form-row">
+            <div class="field">
+              <label class="field-label" for="cart-size">Size</label>
+              <div class="select-field">
+                <select id="cart-size" required>
+                  <option value="">Select Size</option>
+                  <option>XS</option>
+                  <option>S</option>
+                  <option>M</option>
+                  <option>L</option>
+                  <option>XL</option>
+                  <option>XXL</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cart-qty">Quantity</label>
+              <input type="number" id="cart-qty" min="1" value="1" placeholder="Qty">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field">
+              <label class="field-label" for="cart-fabric">Fabric</label>
+              <div class="select-field">
+                <select id="cart-fabric" required>
+                  <option value="">Fabric Preference</option>
+                  <option>Cotton</option>
+                  <option>Cotton-Silk</option>
+                  <option>Jaipur Cotton</option>
+                  <option>Linen Blend</option>
+                  <option>Silk</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="cart-color">Color Preference</label>
+              <div class="select-field">
+                <select id="cart-color">
+                  <option value="">Color Preference</option>
+                  <option>Rose</option>
+                  <option>Ivory</option>
+                  <option>Navy</option>
+                  <option>Maroon</option>
+                  <option>Teal</option>
+                  <option>Mustard</option>
+                  <option>Custom</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="cart-notes">Notes</label>
+            <textarea id="cart-notes" placeholder="Custom notes or special requests..."></textarea>
+          </div>
+          <button class="modal-submit" onclick="submitAddToCart()">Add to Cart</button>
+          <div class="modal-feedback" id="cart-feedback" role="status" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+<script>
+function setImage(src, el) {
+  const main = document.getElementById('mainImage');
+  if (main) {
+    main.style.opacity = '0.4';
+    setTimeout(() => {
+      main.src = src;
+      main.style.opacity = '1';
+    }, 120);
+  }
+  document.querySelectorAll('.thumbs img').forEach(img => img.classList.remove('active'));
+  if (el) el.classList.add('active');
+}
+
+function addToCart(name, pid) {
+  openCartForProduct(name, pid);
+}
+
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 2200);
+}
+
+let currentProduct = '{{ product.name }}';
+let currentProductId = '{{ display_id }}';
+
+let profileCache = null;
+
+async function loadProfile() {
+  if (profileCache !== null) return profileCache;
+  try {
+    const res = await fetch('/api/auth/me');
+    if (!res.ok) { profileCache = null; return null; }
+    const data = await res.json();
+    profileCache = data.user || null;
+    return profileCache;
+  } catch (e) {
+    profileCache = null;
+    return null;
+  }
+}
+
+function fillIfEmpty(id, value) {
+  if (!value) return;
+  const el = document.getElementById(id);
+  if (el && !el.value) el.value = value;
+}
+
+async function autofillProfile() {
+  const user = await loadProfile();
+  if (!user) return;
+  fillIfEmpty('enq-name', user.name);
+  fillIfEmpty('enq-phone', user.phone);
+  fillIfEmpty('enq-email', user.email);
+  fillIfEmpty('ord-name', user.name);
+  fillIfEmpty('ord-phone', user.phone);
+  fillIfEmpty('ord-email', user.email);
+  fillIfEmpty('ord-address', user.address);
+  const pay = document.getElementById('ord-pay');
+  if (pay && !pay.value && user.payment_mode) pay.value = user.payment_mode;
+}
+
+
+function updateBodyLock() {
+  const el = document.getElementById('modalOverlay');
+  document.body.style.overflow = (el && el.classList.contains('open')) ? 'hidden' : '';
+}
+
+function openEnquiry(name, pid) {
+  currentProduct = name || currentProduct;
+  currentProductId = pid || currentProductId;
+  const label = currentProduct ? '* ' + currentProduct : '';
+  const display = document.getElementById('modalProductDisplay');
+  if (display) display.textContent = label;
+  document.getElementById('modalOverlay').classList.add('open');
+  updateBodyLock();
+  clearForms();
+  autofillProfile();
+  switchTab('enquiry');
+}
+
+function openOrder(name, pid) {
+  openEnquiry(name, pid);
+  switchTab('order');
+}
+
+function openCartForProduct(name, pid) {
+  openEnquiry(name, pid);
+  switchTab('cart');
+}
+
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('open');
+  updateBodyLock();
+}
+
+function handleOverlayClick(e) {
+  if (e.target === document.getElementById('modalOverlay')) closeModal();
+}
+
+function switchTab(tab) {
+  document.getElementById('tabEnquiry').classList.toggle('active', tab === 'enquiry');
+  document.getElementById('tabOrder').classList.toggle('active', tab === 'order');
+  document.getElementById('tabCart').classList.toggle('active', tab === 'cart');
+  document.getElementById('formEnquiry').style.display = tab === 'enquiry' ? 'flex' : 'none';
+  document.getElementById('formOrder').style.display   = tab === 'order'   ? 'flex' : 'none';
+  document.getElementById('formCart').style.display    = tab === 'cart'    ? 'flex' : 'none';
+}
+
+function clearForms() {
+  ['enq-name','enq-phone','enq-email','enq-msg','ord-name','ord-phone','ord-email','ord-address','ord-size','ord-fabric','ord-color','ord-notes','cart-size','cart-fabric','cart-color','cart-notes']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const qty = document.getElementById('cart-qty');
+  if (qty) qty.value = 1;
+  const pay = document.getElementById('ord-pay');
+  if (pay) pay.value = 'COD';
+  ['enq-feedback','ord-feedback','cart-feedback','enq-wa','ord-wa'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.textContent = ''; el.style.display = 'none'; }
+  });
+}
+
+function setFeedback(id, msg) {
+  const el = document.getElementById(id);
+  if (el) { el.textContent = msg; }
+}
+
+async function submitEnquiry() {
+  const name  = document.getElementById('enq-name').value.trim();
+  const phone = document.getElementById('enq-phone').value.trim();
+  const email = document.getElementById('enq-email').value.trim();
+  const message = document.getElementById('enq-msg').value.trim();
+  if (!name || !phone) { setFeedback('enq-feedback', 'Name and WhatsApp number are required.'); return; }
+  const btn = document.querySelector('#formEnquiry .modal-submit');
+  btn.disabled = true; btn.textContent = 'Sending...';
+  try {
+    const res = await fetch('/api/enquiry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        phone,
+        email,
+        message,
+        product_id: currentProductId,
+        product_name: currentProduct,
+        type: 'product'
+      })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setFeedback('enq-feedback', data.message || 'Enquiry submitted.');
+      const wa = document.getElementById('enq-wa');
+      if (wa && data.whatsapp) { wa.style.display = 'block'; wa.innerHTML = `WhatsApp: <a href="${data.whatsapp}" target="_blank">Send now</a>`; }
+    } else {
+      setFeedback('enq-feedback', data.error || 'Unable to send enquiry.');
+    }
+  } catch (e) {
+    setFeedback('enq-feedback', 'Network error. Please try again.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send Enquiry';
+  }
+}
+
+async function submitOrder() {
+  const name  = document.getElementById('ord-name').value.trim();
+  const phone = document.getElementById('ord-phone').value.trim();
+  const size = document.getElementById('ord-size').value;
+  const fabric = document.getElementById('ord-fabric').value;
+  const color = document.getElementById('ord-color').value;
+  const notes = document.getElementById('ord-notes').value.trim();
+  if (!name || !phone) { setFeedback('ord-feedback', 'Name and WhatsApp number are required.'); return; }
+  if (!size) { setFeedback('ord-feedback', 'Please select a size.'); return; }
+  if (!fabric) { setFeedback('ord-feedback', 'Please select a fabric.'); return; }
+  if (color === 'Custom' && !notes) { setFeedback('ord-feedback', 'Please add your custom colour in the notes.'); return; }
+  const btn = document.querySelector('#formOrder .modal-submit');
+  btn.disabled = true; btn.textContent = 'Placing Order...';
+  const payload = {
+    name,
+    phone,
+    email: document.getElementById('ord-email').value.trim(),
+    address: document.getElementById('ord-address').value.trim(),
+    product_id: currentProductId,
+    product_name: currentProduct,
+    size: size,
+    fabric_choice: fabric,
+    color_choice: color,
+    payment_method: document.getElementById('ord-pay').value,
+    custom_notes: notes,
+    total_amount: ''
+  };
+  try {
+    const res = await fetch('/api/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (res.ok) {
+      setFeedback('ord-feedback', data.message || 'Order placed. We will confirm on WhatsApp.');
+      const wa = document.getElementById('ord-wa');
+      if (wa && data.whatsapp) { wa.style.display = 'block'; wa.innerHTML = `WhatsApp: <a href="${data.whatsapp}" target="_blank">Send now</a>`; }
+    } else {
+      setFeedback('ord-feedback', data.error || 'Unable to place order.');
+    }
+  } catch (e) {
+    setFeedback('ord-feedback', 'Network error. Please try again.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Place Order';
+  }
+}
+
+async function submitAddToCart() {
+  const qtyEl = document.getElementById('cart-qty');
+  const quantity = parseInt((qtyEl && qtyEl.value) || '1', 10);
+  if (!quantity || quantity < 1) { setFeedback('cart-feedback', 'Please enter a valid quantity.'); return; }
+  const size = document.getElementById('cart-size').value;
+  const fabric = document.getElementById('cart-fabric').value;
+  const color = document.getElementById('cart-color').value;
+  const notesRaw = document.getElementById('cart-notes').value.trim();
+  if (!size) { setFeedback('cart-feedback', 'Please select a size.'); return; }
+  if (!fabric) { setFeedback('cart-feedback', 'Please select a fabric.'); return; }
+  if (color === 'Custom' && !notesRaw) { setFeedback('cart-feedback', 'Please add your custom colour in the notes.'); return; }
+
+  const notesParts = [];
+  if (fabric) notesParts.push('Fabric: ' + fabric);
+  if (color) notesParts.push('Color: ' + color);
+  if (notesRaw) notesParts.push('Notes: ' + notesRaw);
+
+  const payload = {
+    product_name: currentProduct,
+    product_id: currentProductId,
+    quantity: quantity,
+    size: size,
+    notes: notesParts.join(' | ')
+  };
+
+  const btn = document.querySelector('#formCart .modal-submit');
+  btn.disabled = true; btn.textContent = 'Adding...';
+  try {
+    const res = await fetch('/api/cart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.status === 401) {
+      window.location.href = '/';
+      return;
+    }
+    const data = await res.json();
+    if (res.ok && data.success) {
+      setFeedback('cart-feedback', data.message || 'Added to cart.');
+      showToast(data.message || 'Added to cart');
+    } else {
+      setFeedback('cart-feedback', data.error || 'Unable to add to cart.');
+    }
+  } catch (e) {
+    setFeedback('cart-feedback', 'Network error. Please try again.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Add to Cart';
+  }
+}
+
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/products")
+def products_page():
+    products, _ = build_products_from_images()
+    return render_template_string(PRODUCTS_PAGE_HTML, products=products)
+
+
+@app.route("/product/<code>")
+def product_detail_page(code):
+    pid = product_id_from_code(code)
+    if not pid:
+        return ("Product not found", 404)
+    products, by_pid = build_products_from_images()
+    product = by_pid.get(pid)
+    if not product:
+        return ("Product not found", 404)
+    display_id = product["product_id"]
+    description = product_description(product)
+    related = [p for p in products if p["product_id"] != pid][:4]
+    return render_template_string(
+        PRODUCT_DETAIL_HTML,
+        product=product,
+        gallery=product.get("images", []),
+        display_id=display_id,
+        description=description,
+        related=related,
+    )
+
+
+@app.route("/media/<path:filename>")
+def serve_media(filename):
+    return send_from_directory(str(BASE_DIR / "instance" / "images"), filename)
+
+
 # ─── Serve Frontend ───────────────────────────────────────────
 @app.route("/")
 def serve_frontend():
@@ -1130,7 +2194,7 @@ ADMIN_LOGIN_HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Syamaa Admin Login</title>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2...family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
 <style>
   :root { --dark:#1A0F0A; --gold:#C9900C; --gold-light:#F0C040; --cream:#FAF3E8; --blush:#F2D5B0; }
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -1173,7 +2237,7 @@ ADMIN_DASHBOARD_HTML = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Syamaa Admin Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2...family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=Josefin+Sans:wght@300;400&display=swap" rel="stylesheet">
 <style>
   :root{--dark:#1A0F0A;--dark2:#120A05;--gold:#C9900C;--gold-light:#F0C040;--cream:#FAF3E8;--blush:#F2D5B0;--warm:#3D1F0F;--saffron:#C4722A;--red:#8B1A1A;--green:#1B6B3D;}
   *{margin:0;padding:0;box-sizing:border-box;}
@@ -1228,7 +2292,38 @@ ADMIN_DASHBOARD_HTML = """
   .action-btn:hover{background:var(--gold);color:var(--dark);}
   .wa-btn{background:rgba(37,211,102,0.1);border-color:rgba(37,211,102,0.3);color:#25D366;}
   .wa-btn:hover{background:#25D366;color:white;}
+  
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:36px;}
+  .product-admin{display:flex;flex-direction:column;gap:18px;}
+  .product-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;}
+  .form-card{background:rgba(255,255,255,0.02);border:1px solid rgba(201,144,12,0.15);padding:18px;border-radius:16px;}
+  .form-card.preview{background:rgba(18,10,5,0.9);}  
+  .form-title{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:var(--gold);margin-bottom:12px;}
+  .form-card label{font-size:9px;letter-spacing:0.25em;text-transform:uppercase;color:var(--blush);opacity:0.8;margin-top:12px;display:block;}
+  .form-card input,.form-card textarea,.form-card select{width:100%;margin-top:6px;background:transparent;border:1px solid rgba(201,144,12,0.2);padding:10px 12px;border-radius:10px;color:var(--cream);font-family:'Josefin Sans',sans-serif;font-size:12px;}
+  .form-card input:focus,.form-card textarea:focus,.form-card select:focus{outline:none;border-color:var(--gold);}
+  .form-card textarea{resize:vertical;min-height:90px;}
+  .form-card .hint{font-size:10px;color:rgba(242,213,176,0.5);display:block;margin-top:6px;}
+  .toggle-row{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--blush);opacity:0.75;margin:8px 0 4px;}
+  .action-btn.primary{background:var(--gold);color:var(--dark);border-color:var(--gold);width:100%;padding:10px 14px;border-radius:999px;margin-top:12px;}
+  .section-actions{font-size:10px;color:rgba(242,213,176,0.6);}
+  .preview-card{border:1px solid rgba(201,144,12,0.25);border-radius:16px;overflow:hidden;}
+  .preview-image{height:180px;background:linear-gradient(120deg,rgba(201,144,12,0.2),rgba(61,31,15,0.4));background-size:cover;background-position:center;}
+  .preview-meta{display:flex;justify-content:space-between;font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(242,213,176,0.7);padding:12px 14px 0;}
+  .preview-name{padding:8px 14px 0;font-family:'Cormorant Garamond',serif;font-size:20px;font-weight:300;}
+  .preview-price{padding:6px 14px 14px;color:var(--gold-light);font-size:12px;letter-spacing:0.18em;text-transform:uppercase;}
+  .preview-status{padding:0 14px 14px;font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(240,192,64,0.8);}  
+  .image-strip{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+  .image-strip img{width:60px;height:80px;object-fit:cover;border-radius:10px;border:1px solid rgba(201,144,12,0.2);}  
+  .image-strip .empty{font-size:10px;color:rgba(242,213,176,0.5);border:1px dashed rgba(201,144,12,0.2);padding:10px;border-radius:10px;}
+    .image-meta{font-size:9px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(242,213,176,0.6);margin-top:8px;}
+  .image-meta .ok{color:#80F2A0;}
+  .image-meta .warn{color:#F2A080;}
+.status-active{color:#80F2A0;border-color:rgba(128,242,160,0.3);}
+  .status-draft{color:#F0C040;border-color:rgba(240,192,64,0.3);}  
+  .status-hidden{color:rgba(242,213,176,0.5);border-color:rgba(242,213,176,0.2);}  
+  @media (max-width: 900px){.grid2{grid-template-columns:1fr;}.topbar{padding:18px 20px;}.content{padding:24px 20px;}}
+
   /* Toast */
   .toast{position:fixed;bottom:24px;right:24px;background:rgba(27,107,61,0.9);border:1px solid rgba(27,107,61,0.6);color:var(--cream);padding:12px 24px;font-size:11px;letter-spacing:0.1em;opacity:0;transition:opacity 0.3s;z-index:1000;pointer-events:none;}
   .toast.show{opacity:1;}
@@ -1324,7 +2419,7 @@ ADMIN_DASHBOARD_HTML = """
             <td>{{ e.product_name or '—' }}</td>
             <td><span class="status-badge status-{{ e.status }}">{{ e.status }}</span></td>
             <td>
-              <a href="https://wa.me/91{{ e.phone }}?text=Hi {{ e.name }}! Thank you for your enquiry about {{ e.product_name or 'our collection' }}." target="_blank">
+              <a href="https://wa.me/91{{ e.phone }}?text={{ ('Hi ' ~ e.name ~ '! Thank you for your enquiry about ' ~ (e.product_name or 'our collection') ~ '.') | urlencode }}" target="_blank">
                 <button class="action-btn wa-btn">WhatsApp</button>
               </a>
             </td>
@@ -1391,6 +2486,7 @@ async function loadSection(section) {
     const res = await fetch('/admin/api/products');
     const data = await res.json();
     main.innerHTML = renderProducts(data.products);
+    setTimeout(() => updateProductPreview(), 0);
   } else if (section === 'newsletter') {
     title.textContent = 'Newsletter Subscribers';
     const res = await fetch('/admin/api/newsletter');
@@ -1460,21 +2556,119 @@ function renderOrders(rows) {
 }
 
 function renderProducts(rows) {
-  let html = `<div style="text-align:right;margin-bottom:16px;">
-    <button class="tab active" onclick="showAddProduct()">+ Add Product</button>
-  </div>
-  <table><thead><tr><th>#</th><th>Name</th><th>Category</th><th>Fabric</th><th>Color</th><th>Tag</th><th>Active</th><th>Actions</th></tr></thead><tbody>`;
+  productCache = rows || [];
+  let html = `
+  <div class="product-admin">
+    <div class="section-header" style="margin-bottom:16px;">
+      <div class="section-title" id="productFormTitle">Add Product</div>
+      <div class="section-actions">Admin catalog is the single source of truth.</div>
+    </div>
+
+    <div class="product-form">
+      <div class="form-card">
+        <div class="form-title">General</div>
+        <label>Product ID</label>
+        <input id="prod-id" placeholder="SYA0001" oninput="updateProductPreview()">
+        <small class="hint">Images should be stored in /instance/images/SYA0001/. Product ID is immutable after save.</small>
+        <label>Product Name</label>
+        <input id="prod-name" placeholder="Product name" oninput="updateProductPreview()">
+        <label>Short Description</label>
+        <input id="prod-short" placeholder="Short description" oninput="updateProductPreview()">
+        <label>Full Description</label>
+        <textarea id="prod-desc" rows="4" placeholder="Detailed description" oninput="updateProductPreview()"></textarea>
+        <label>Category</label>
+        <input id="prod-category" placeholder="Kurta, Kurti Set, Saree" oninput="updateProductPreview()">
+        <label>Tags / Collections</label>
+        <input id="prod-tags" placeholder="Festive, Signature, Summer" oninput="updateProductPreview()">
+      </div>
+
+      <div class="form-card">
+        <div class="form-title">Pricing & Stock</div>
+        <label>Price</label>
+        <input id="prod-price" type="number" min="0" step="1" placeholder="1499" oninput="updateProductPreview()">
+        <label>Stock Quantity</label>
+        <input id="prod-stock" type="number" min="0" value="0" oninput="updateProductPreview()">
+        <label>Status</label>
+        <select id="prod-status" onchange="updateProductPreview()">
+          <option value="active">Active</option>
+          <option value="draft">Draft</option>
+          <option value="hidden">Hidden</option>
+        </select>
+        <label>Style (Optional)</label>
+        <input id="prod-style" placeholder="Straight, Angrakha" oninput="updateProductPreview()">
+        <label>Fabric (Optional)</label>
+        <input id="prod-fabric" placeholder="Cotton, Silk" oninput="updateProductPreview()">
+        <label>Color (Optional)</label>
+        <input id="prod-color" placeholder="Rose, Ivory" oninput="updateProductPreview()">
+      </div>
+
+      <div class="form-card">
+        <div class="form-title">Images</div>
+        <div class="image-strip" id="imageStrip">
+          <span class="empty">Add poster.jpg and gallery images inside /instance/images/{ID}/</span>
+        </div>
+        <div class="image-meta" id="imageMeta">Waiting for a valid Product ID.</div>
+        <button class="action-btn" style="margin-top:10px;" onclick="rescanImages()">Rescan images</button>
+        <small class="hint">Poster image will be used on the home featured collection.</small>
+      </div>
+
+      <div class="form-card">
+        <div class="form-title">Display</div>
+        <label>Featured</label>
+        <div class="toggle-row">
+          <input id="prod-featured" type="checkbox" onchange="updateProductPreview()">
+          <span>Show in Featured Collection</span>
+        </div>
+        <label>Display Order</label>
+        <input id="prod-order" type="number" value="0" oninput="updateProductPreview()">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="action-btn primary" id="productSaveBtn" onclick="submitProductForm()">Save Product</button>
+          <button class="action-btn" id="productCancelBtn" style="display:none;" onclick="resetProductForm()">Cancel Edit</button>
+        </div>
+      </div>
+
+      <div class="form-card preview">
+        <div class="form-title">Live Preview</div>
+        <div class="preview-card" id="productPreview">
+          <div class="preview-image" id="previewImage"></div>
+          <div class="preview-meta">
+            <span id="previewId">SYA0001</span>
+            <span id="previewCategory">Category</span>
+          </div>
+          <div class="preview-name" id="previewName">Product Name</div>
+          <div class="preview-price" id="previewPrice">Contact for Price</div>
+          <div class="preview-status" id="previewStatus">Active</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-header" style="margin-top:28px;">
+      <div class="section-title">Products</div>
+      <div class="section-actions">Only Active products appear on the storefront.</div>
+    </div>
+
+    <table><thead><tr><th>#</th><th>Product ID</th><th>Name</th><th>Status</th><th>Stock</th><th>Featured</th><th>Images</th><th>Price</th><th>Category</th><th>Actions</th></tr></thead><tbody>`;
+
   rows.forEach(p => {
+    const featuredBadge = p.featured ? '<span class=\"status-badge status-confirmed\">Yes</span>' : '<span class=\"status-badge status-closed\">No</span>';
+    const status = p.status || 'active';
+    const imageCount = Number(p.image_count || 0);
+    const hasPoster = !!p.has_poster;
+    const posterBadge = hasPoster ? '<span class=\"status-badge status-confirmed\">poster</span>' : '<span class=\"status-badge status-pending\">no poster</span>';
     html += `<tr>
       <td>${p.id}</td>
+      <td>${p.product_id || '?'}</td>
       <td>${p.name}</td>
+      <td>${statusBadge(status)}</td>
+      <td>${p.stock_qty||0}</td>
+      <td>${featuredBadge}</td>
+      <td>${imageCount} ${imageCount === 1 ? 'img' : 'imgs'}<div style="margin-top:6px;">${posterBadge}</div></td>
+      <td>${p.price||'Contact for Price'}</td>
       <td>${p.category}</td>
-      <td>${p.fabric||'—'}</td>
-      <td>${p.color||'—'}</td>
-      <td>${p.tag||'—'}</td>
-      <td>${p.is_active ? '✅' : '❌'}</td>
-      <td>
-        <button class="action-btn" style="color:#F2A080;border-color:rgba(242,160,128,0.3);" onclick="deleteProduct(${p.id})">Archive</button>
+      <td style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="action-btn" onclick="editProductById(${p.id})">Edit</button>
+        <button class="action-btn" onclick="deleteProduct(${p.id}, false)">Archive</button>
+        <button class="action-btn" style="color:#E37070;border-color:rgba(227,112,112,0.4);" onclick="deleteProduct(${p.id}, true)">Delete</button>
       </td>
     </tr>`;
   });
@@ -1506,7 +2700,7 @@ function renderUsers(rows) {
       <td>${u.email}</td>
       <td>${u.phone||'—'}</td>
       <td>${u.address ? u.address.slice(0,40) : '—'}</td>
-      <td>${u.is_active ? '<span class="status-badge status-contacted">active</span>' : '<span class="status-badge status-closed">inactive</span>'}</td>
+      <td>${u.is_active ? '<span class=\"status-badge status-contacted\">active</span>' : '<span class=\"status-badge status-closed\">inactive</span>'}</td>
       <td>${u.created_at.slice(0,10)}</td>
     </tr>`;
   });
@@ -1525,26 +2719,211 @@ async function updateOrder(id, status) {
   else showToast('Update failed', 'error');
 }
 
-async function deleteProduct(id) {
-  if (!confirm('Archive this product?')) return;
-  const res = await fetch(`/admin/api/products/${id}`, {method:'DELETE'});
-  if (res.ok) { showToast('Product archived'); loadSection('products'); }
-  else showToast('Failed', 'error');
+async function deleteProduct(id, permanent) {
+  if (permanent) {
+    if (!confirm('Delete this product permanently? This cannot be undone.')) return;
+  } else {
+    if (!confirm('Archive this product (hide from storefront)?')) return;
+  }
+  const url = permanent ? `/admin/api/products/${id}?hard=1` : `/admin/api/products/${id}`;
+  const res = await fetch(url, {method:'DELETE'});
+  if (res.ok) {
+    showToast(permanent ? 'Product deleted' : 'Product archived');
+    loadSection('products');
+  } else {
+    showToast('Failed', 'error');
+  }
 }
 
-function showAddProduct() {
-  const name = prompt('Product Name:');
-  if (!name) return;
-  const category = prompt('Category (e.g. Angrakha, Kurti Set):');
-  if (!category) return;
-  fetch('/admin/api/products', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, category})
-  }).then(r => r.json()).then(d => {
-    if (d.success) { showToast('Product added!'); loadSection('products'); }
-    else showToast(d.error || 'Failed', 'error');
-  });
+let previewImageCache = {};
+
+async function fetchProductImages(pid) {
+  if (!pid) return [];
+  const normalized = pid.toUpperCase();
+  if (previewImageCache[normalized]) {
+    return previewImageCache[normalized];
+  }
+  try {
+    const res = await fetch(`/admin/api/product-images/${normalized}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    previewImageCache[normalized] = data.images || [];
+    return previewImageCache[normalized];
+  } catch (err) {
+    return [];
+  }
 }
+
+function renderImageStrip(images) {
+  const strip = document.getElementById('imageStrip');
+  const meta = document.getElementById('imageMeta');
+  if (!strip) return;
+  if (!images || !images.length) {
+    strip.innerHTML = '<span class="empty">No images found yet. Add poster.jpg and gallery images.</span>';
+    if (meta) meta.innerHTML = '<span class="warn">No images found</span> for this Product ID.';
+    return;
+  }
+  const hasPoster = images.some(img => (img.split('/').pop() || '').toLowerCase().startsWith('poster'));
+  if (meta) {
+    const countLabel = `${images.length} ${images.length === 1 ? 'image' : 'images'}`;
+    meta.innerHTML = `<span class="${hasPoster ? 'ok' : 'warn'}">${countLabel}</span> - ${hasPoster ? 'Poster detected' : 'Poster missing'}`;
+  }
+  strip.innerHTML = images.map(img => `<img src="${img}" loading="lazy" alt="Product image">`).join('');
+}
+
+
+async function rescanImages() {
+  const pid = (document.getElementById('prod-id').value || '').trim().toUpperCase();
+  if (!/^SYA\\d{4}$/.test(pid)) {
+    showToast('Enter a valid Product ID first', 'error');
+    return;
+  }
+  delete previewImageCache[pid];
+  updateProductPreview();
+  showToast('Image scan refreshed');
+}
+
+async function updateProductPreview() {
+  const idEl = document.getElementById('prod-id');
+  if (!idEl) return;
+  const pid = (idEl.value || 'SYA0001').trim().toUpperCase();
+  const name = (document.getElementById('prod-name')?.value || 'Product Name').trim();
+  const category = (document.getElementById('prod-category')?.value || 'Category').trim();
+  const priceRaw = (document.getElementById('prod-price')?.value || '').trim();
+  const status = (document.getElementById('prod-status')?.value || 'active').trim();
+
+  document.getElementById('previewId').textContent = pid || 'SYA0001';
+  document.getElementById('previewCategory').textContent = category || 'Category';
+  document.getElementById('previewName').textContent = name || 'Product Name';
+  const priceText = priceRaw ? (isNaN(Number(priceRaw)) ? priceRaw : `INR ${priceRaw}`) : 'Contact for Price';
+  document.getElementById('previewPrice').textContent = priceText;
+  document.getElementById('previewStatus').textContent = status;
+
+  const previewImage = document.getElementById('previewImage');
+  if (!/^SYA\\d{4}$/.test(pid)) {
+    previewImage.style.backgroundImage = 'linear-gradient(120deg,rgba(201,144,12,0.2),rgba(61,31,15,0.4))';
+    renderImageStrip([]);
+    return;
+  }
+
+  const images = await fetchProductImages(pid);
+  if (images.length) {
+    previewImage.style.backgroundImage = `url('${images[0]}')`;
+  } else {
+    previewImage.style.backgroundImage = 'linear-gradient(120deg,rgba(201,144,12,0.2),rgba(61,31,15,0.4))';
+  }
+  renderImageStrip(images);
+}
+
+let editingProductId = null;
+let productCache = [];
+
+function resetProductForm() {
+  editingProductId = null;
+  document.getElementById('prod-id').disabled = false;
+  document.getElementById('prod-id').value = '';
+  document.getElementById('prod-name').value = '';
+  document.getElementById('prod-short').value = '';
+  document.getElementById('prod-desc').value = '';
+  document.getElementById('prod-category').value = '';
+  document.getElementById('prod-tags').value = '';
+  document.getElementById('prod-price').value = '';
+  document.getElementById('prod-stock').value = 0;
+  document.getElementById('prod-status').value = 'active';
+  document.getElementById('prod-style').value = '';
+  document.getElementById('prod-fabric').value = '';
+  document.getElementById('prod-color').value = '';
+  document.getElementById('prod-featured').checked = false;
+  document.getElementById('prod-order').value = 0;
+  const title = document.getElementById('productFormTitle');
+  if (title) title.textContent = 'Add Product';
+  const saveBtn = document.getElementById('productSaveBtn');
+  if (saveBtn) saveBtn.textContent = 'Save Product';
+  const cancelBtn = document.getElementById('productCancelBtn');
+  if (cancelBtn) cancelBtn.style.display = 'none';
+  updateProductPreview();
+}
+
+function editProductById(id) {
+  const p = (productCache || []).find(x => Number(x.id) === Number(id));
+  if (!p) {
+    showToast('Product not found', 'error');
+    return;
+  }
+  const pid = (p.product_id || ('SYA' + String(p.id).padStart(4, '0'))).toUpperCase();
+  editingProductId = p.id;
+  document.getElementById('prod-id').value = pid;
+  document.getElementById('prod-id').disabled = true;
+  document.getElementById('prod-name').value = p.name || '';
+  document.getElementById('prod-short').value = p.short_desc || '';
+  document.getElementById('prod-desc').value = p.description || '';
+  document.getElementById('prod-category').value = p.category || '';
+  document.getElementById('prod-tags').value = p.tags || '';
+  document.getElementById('prod-price').value = p.price || '';
+  document.getElementById('prod-stock').value = p.stock_qty || 0;
+  document.getElementById('prod-status').value = p.status || 'active';
+  document.getElementById('prod-style').value = p.style || '';
+  document.getElementById('prod-fabric').value = p.fabric || '';
+  document.getElementById('prod-color').value = p.color || '';
+  document.getElementById('prod-featured').checked = !!p.featured;
+  document.getElementById('prod-order').value = p.display_order || 0;
+  const title = document.getElementById('productFormTitle');
+  if (title) title.textContent = 'Edit Product';
+  const saveBtn = document.getElementById('productSaveBtn');
+  if (saveBtn) saveBtn.textContent = 'Update Product';
+  const cancelBtn = document.getElementById('productCancelBtn');
+  if (cancelBtn) cancelBtn.style.display = 'inline-flex';
+  updateProductPreview();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function submitProductForm() {
+  const product_id = (document.getElementById('prod-id').value || '').trim().toUpperCase();
+  const name = (document.getElementById('prod-name').value || '').trim();
+  const category = (document.getElementById('prod-category').value || '').trim();
+  if (!/^SYA\d{4}$/.test(product_id)) {
+    showToast('Product ID must be like SYA0001', 'error');
+    return;
+  }
+  if (!name || !category) {
+    showToast('Name and category are required', 'error');
+    return;
+  }
+
+  const payload = {
+    product_id,
+    name,
+    category,
+    short_desc: (document.getElementById('prod-short').value || '').trim(),
+    description: (document.getElementById('prod-desc').value || '').trim(),
+    tags: (document.getElementById('prod-tags').value || '').trim(),
+    price: (document.getElementById('prod-price').value || '').trim(),
+    stock_qty: document.getElementById('prod-stock').value,
+    status: document.getElementById('prod-status').value,
+    style: (document.getElementById('prod-style').value || '').trim(),
+    fabric: (document.getElementById('prod-fabric').value || '').trim(),
+    color: (document.getElementById('prod-color').value || '').trim(),
+    featured: document.getElementById('prod-featured').checked,
+    display_order: document.getElementById('prod-order').value,
+  };
+
+  const url = editingProductId ? `/admin/api/products/${editingProductId}` : '/admin/api/products';
+  const method = editingProductId ? 'PUT' : 'POST';
+  const res = await fetch(url, {
+    method,
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (res.ok && data.success) {
+    showToast(editingProductId ? 'Product updated!' : 'Product added!');
+    resetProductForm();
+    loadSection('products');
+  } else {
+    showToast(data.error || 'Failed to save product', 'error');
+  }
+}
+
 </script>
 </body>
 </html>
