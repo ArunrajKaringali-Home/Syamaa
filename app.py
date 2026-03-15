@@ -157,6 +157,30 @@ def init_db():
             source      TEXT,
             created_at  TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT    NOT NULL,
+            email         TEXT    UNIQUE NOT NULL,
+            phone         TEXT,
+            password_hash TEXT    NOT NULL,
+            address       TEXT,
+            is_active     INTEGER DEFAULT 1,
+            created_at    TEXT    DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS cart_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            product_id  INTEGER REFERENCES products(id),
+            product_name TEXT   NOT NULL,
+            price       TEXT    DEFAULT 'Contact for Price',
+            image_url   TEXT,
+            quantity    INTEGER DEFAULT 1,
+            size        TEXT,
+            notes       TEXT,
+            added_at    TEXT    DEFAULT (datetime('now'))
+        );
     """
     )
     db.commit()
@@ -255,6 +279,16 @@ def admin_required(f):
             if request.is_json:
                 return jsonify({"error": "Unauthorized"}), 401
             return redirect("/admin/login")
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("user_id"):
+            return jsonify({"error": "Login required"}), 401
         return f(*args, **kwargs)
 
     return decorated
@@ -457,6 +491,294 @@ def subscribe_newsletter():
     return jsonify({"success": True, "message": "Welcome to the Syamaa circle! ✦"}), 201
 
 
+# ─── API: User Registration & Auth ───────────────────────────
+@app.route("/api/auth/register", methods=["POST"])
+def user_register():
+    data = request.get_json(silent=True) or request.form.to_dict()
+
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    phone = re.sub(r"[\s\-\+()]", "", (data.get("phone") or ""))
+    password = data.get("password") or ""
+    address = (data.get("address") or "").strip()
+
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if not email or not validate_email(email):
+        return jsonify({"error": "A valid email is required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    if phone and not validate_phone(phone):
+        return jsonify({"error": "Please enter a valid 10-digit phone number"}), 400
+
+    existing = query("SELECT id FROM users WHERE email=?", (email,), one=True)
+    if existing:
+        return jsonify({"error": "An account with this email already exists"}), 409
+
+    pw_hash = hash_password(password)
+    query(
+        "INSERT INTO users (name,email,phone,password_hash,address) VALUES (?,?,?,?,?)",
+        (name, email, phone or None, pw_hash, address or None),
+    )
+    user = query("SELECT * FROM users WHERE email=?", (email,), one=True)
+    session["user_id"] = user["id"]
+    session["user_name"] = user["name"]
+    session["user_email"] = user["email"]
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "message": f"Welcome to Syamaa, {name}! ✦",
+                "user": {
+                    "id": user["id"],
+                    "name": user["name"],
+                    "email": user["email"],
+                },
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def user_login():
+    data = request.get_json(silent=True) or request.form.to_dict()
+
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    user = query(
+        "SELECT * FROM users WHERE email=? AND is_active=1", (email,), one=True
+    )
+    if not user or not hmac.compare_digest(
+        user["password_hash"], hash_password(password)
+    ):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    session.permanent = True
+    session["user_id"] = user["id"]
+    session["user_name"] = user["name"]
+    session["user_email"] = user["email"]
+
+    return jsonify(
+        {
+            "success": True,
+            "message": f"Welcome back, {user['name']}! ✦",
+            "user": {"id": user["id"], "name": user["name"], "email": user["email"]},
+        }
+    )
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def user_logout():
+    session.pop("user_id", None)
+    session.pop("user_name", None)
+    session.pop("user_email", None)
+    return jsonify({"success": True, "message": "Logged out successfully"})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+@login_required
+def user_me():
+    user = query(
+        "SELECT id,name,email,phone,address,created_at FROM users WHERE id=?",
+        (session["user_id"],),
+        one=True,
+    )
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"user": user})
+
+
+# ─── API: Cart ────────────────────────────────────────────────
+@app.route("/api/cart", methods=["GET"])
+@login_required
+def get_cart():
+    items = query(
+        "SELECT * FROM cart_items WHERE user_id=? ORDER BY added_at DESC",
+        (session["user_id"],),
+    )
+    return jsonify({"cart": items, "count": len(items)})
+
+
+@app.route("/api/cart", methods=["POST"])
+@login_required
+def add_to_cart():
+    data = request.get_json(silent=True) or request.form.to_dict()
+
+    product_id = data.get("product_id")
+    product_name = (data.get("product_name") or "").strip()
+    quantity = int(data.get("quantity") or 1)
+    size = (data.get("size") or "").strip()
+    notes = (data.get("notes") or "").strip()
+
+    if not product_name:
+        return jsonify({"error": "Product name is required"}), 400
+    if quantity < 1:
+        return jsonify({"error": "Quantity must be at least 1"}), 400
+
+    # If product_id given, fetch latest details
+    price = "Contact for Price"
+    image_url = None
+    if product_id:
+        p = query(
+            "SELECT price,image_url FROM products WHERE id=?", (product_id,), one=True
+        )
+        if p:
+            price = p["price"]
+            image_url = p["image_url"]
+
+    # Check if same product+size already in cart → increment quantity
+    existing = query(
+        "SELECT id,quantity FROM cart_items WHERE user_id=? AND product_name=? AND (size=? OR (size IS NULL AND ?=''))",
+        (session["user_id"], product_name, size, size),
+        one=True,
+    )
+    if existing:
+        new_qty = existing["quantity"] + quantity
+        query("UPDATE cart_items SET quantity=? WHERE id=?", (new_qty, existing["id"]))
+        return jsonify(
+            {"success": True, "message": "Cart updated ✦", "action": "updated"}
+        )
+
+    query(
+        "INSERT INTO cart_items (user_id,product_id,product_name,price,image_url,quantity,size,notes) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            session["user_id"],
+            product_id or None,
+            product_name,
+            price,
+            image_url,
+            quantity,
+            size or None,
+            notes or None,
+        ),
+    )
+    return (
+        jsonify(
+            {
+                "success": True,
+                "message": f"'{product_name}' added to cart 🛍️",
+                "action": "added",
+            }
+        ),
+        201,
+    )
+
+
+@app.route("/api/cart/<int:item_id>", methods=["PATCH"])
+@login_required
+def update_cart_item(item_id):
+    data = request.get_json(silent=True) or {}
+    item = query(
+        "SELECT id FROM cart_items WHERE id=? AND user_id=?",
+        (item_id, session["user_id"]),
+        one=True,
+    )
+    if not item:
+        return jsonify({"error": "Cart item not found"}), 404
+
+    quantity = data.get("quantity")
+    size = data.get("size")
+    notes = data.get("notes")
+
+    if quantity is not None:
+        if int(quantity) < 1:
+            return jsonify({"error": "Quantity must be at least 1"}), 400
+        query("UPDATE cart_items SET quantity=? WHERE id=?", (int(quantity), item_id))
+    if size is not None:
+        query("UPDATE cart_items SET size=? WHERE id=?", (size, item_id))
+    if notes is not None:
+        query("UPDATE cart_items SET notes=? WHERE id=?", (notes, item_id))
+
+    return jsonify({"success": True, "message": "Cart item updated"})
+
+
+@app.route("/api/cart/<int:item_id>", methods=["DELETE"])
+@login_required
+def remove_from_cart(item_id):
+    item = query(
+        "SELECT id FROM cart_items WHERE id=? AND user_id=?",
+        (item_id, session["user_id"]),
+        one=True,
+    )
+    if not item:
+        return jsonify({"error": "Cart item not found"}), 404
+    query("DELETE FROM cart_items WHERE id=?", (item_id,))
+    return jsonify({"success": True, "message": "Item removed from cart"})
+
+
+@app.route("/api/cart/clear", methods=["DELETE"])
+@login_required
+def clear_cart():
+    query("DELETE FROM cart_items WHERE user_id=?", (session["user_id"],))
+    return jsonify({"success": True, "message": "Cart cleared"})
+
+
+@app.route("/api/checkout", methods=["POST"])
+@login_required
+def checkout_cart():
+    data = request.get_json(silent=True) or {}
+
+    user = query(
+        "SELECT id,name,email,phone,address FROM users WHERE id=? AND is_active=1",
+        (session["user_id"],),
+        one=True,
+    )
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    if not user.get("phone"):
+        return jsonify({"error": "Please add your phone number in your account before checkout"}), 400
+
+    address = (data.get("address") or "").strip() or (user.get("address") or "")
+    payment = data.get("payment_method") or "COD"
+
+    items = query(
+        "SELECT * FROM cart_items WHERE user_id=? ORDER BY added_at DESC",
+        (session["user_id"],),
+    )
+    if not items:
+        return jsonify({"error": "Your cart is empty"}), 400
+
+    for item in items:
+        product_name = item.get("product_name") or ""
+        size = item.get("size") or ""
+        notes = item.get("notes") or ""
+        qty = item.get("quantity") or 1
+        custom_notes = f"Qty: {qty}" + (f" | {notes}" if notes else "")
+        total_amount = item.get("price") or "Contact for Price"
+
+        query(
+            """INSERT INTO orders
+               (name,phone,email,address,product_name,size,custom_notes,
+                fabric_choice,color_choice,payment_method,total_amount)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                user["name"],
+                user["phone"],
+                user.get("email"),
+                address or None,
+                product_name,
+                size or None,
+                custom_notes or None,
+                None,
+                None,
+                payment,
+                total_amount,
+            ),
+        )
+
+    query("DELETE FROM cart_items WHERE user_id=?", (session["user_id"],))
+
+    return jsonify({"success": True, "message": f"Order placed for {len(items)} item(s)"})
+
+
+
 # ─── Admin: Auth ──────────────────────────────────────────────
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
@@ -500,6 +822,9 @@ def admin_dashboard():
         )["c"],
         "subscribers": query(
             "SELECT COUNT(*) as c FROM newsletter WHERE is_active=1", one=True
+        )["c"],
+        "registered_users": query(
+            "SELECT COUNT(*) as c FROM users WHERE is_active=1", one=True
         )["c"],
     }
     recent_enquiries = query(
@@ -660,6 +985,15 @@ def admin_newsletter():
     return jsonify({"subscribers": rows, "count": len(rows)})
 
 
+@app.route("/admin/api/users")
+@admin_required
+def admin_users():
+    rows = query(
+        "SELECT id,name,email,phone,address,is_active,created_at FROM users ORDER BY created_at DESC"
+    )
+    return jsonify({"users": rows, "count": len(rows)})
+
+
 @app.route("/admin/api/stats")
 @admin_required
 def admin_stats():
@@ -818,6 +1152,7 @@ ADMIN_DASHBOARD_HTML = """
     <a class="nav-item" href="#" onclick="loadSection('orders')"><span class="icon">📦</span> Orders</a>
     <a class="nav-item" href="#" onclick="loadSection('products')"><span class="icon">👗</span> Products</a>
     <a class="nav-item" href="#" onclick="loadSection('newsletter')"><span class="icon">✉️</span> Newsletter</a>
+    <a class="nav-item" href="#" onclick="loadSection('users')"><span class="icon">👤</span> Users</a>
   </nav>
   <div class="sidebar-footer">
     <div class="admin-badge">Signed in as {{ admin_name }}</div>
@@ -859,6 +1194,11 @@ ADMIN_DASHBOARD_HTML = """
         <span class="stat-label">Newsletter</span>
         <div class="stat-value">{{ stats.subscribers }}</div>
         <div class="stat-sub">Active subscribers</div>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Registered Users</span>
+        <div class="stat-value">{{ stats.registered_users }}</div>
+        <div class="stat-sub">Accounts created</div>
       </div>
       <div class="stat-card">
         <span class="stat-label">WhatsApp</span>
@@ -961,6 +1301,11 @@ async function loadSection(section) {
     const res = await fetch('/admin/api/newsletter');
     const data = await res.json();
     main.innerHTML = renderNewsletter(data.subscribers);
+  } else if (section === 'users') {
+    title.textContent = 'Registered Users';
+    const res = await fetch('/admin/api/users');
+    const data = await res.json();
+    main.innerHTML = renderUsers(data.users);
   }
 }
 
@@ -1051,6 +1396,23 @@ function renderNewsletter(rows) {
       <td>${s.email}</td>
       <td>${s.whatsapp||'—'}</td>
       <td>${s.created_at.slice(0,10)}</td>
+    </tr>`;
+  });
+  return html + '</tbody></table>';
+}
+
+function renderUsers(rows) {
+  let html = `<div style="margin-bottom:12px;font-size:11px;color:var(--gold);">${rows.length} registered users</div>
+  <table><thead><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Address</th><th>Status</th><th>Joined</th></tr></thead><tbody>`;
+  rows.forEach(u => {
+    html += `<tr>
+      <td>${u.id}</td>
+      <td>${u.name}</td>
+      <td>${u.email}</td>
+      <td>${u.phone||'—'}</td>
+      <td>${u.address ? u.address.slice(0,40) : '—'}</td>
+      <td>${u.is_active ? '<span class="status-badge status-contacted">active</span>' : '<span class="status-badge status-closed">inactive</span>'}</td>
+      <td>${u.created_at.slice(0,10)}</td>
     </tr>`;
   });
   return html + '</tbody></table>';
