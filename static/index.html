@@ -1156,6 +1156,25 @@
     font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
     text-decoration: none; transition: background 0.3s;
   }
+  .profile-modal { max-width: 720px; }
+  .profile-tabs { margin-bottom: 20px; }
+  .profile-orders { display: flex; flex-direction: column; gap: 16px; }
+  .orders-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .orders-title { font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gold-light,#F0C040); }
+  .orders-list { display: flex; flex-direction: column; gap: 12px; }
+  .order-card { border: 1px solid rgba(201,144,12,0.2); border-radius: 14px; padding: 14px 16px; background: rgba(255,255,255,0.02); }
+  .order-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .order-title { font-family: 'Cormorant Garamond', serif; font-size: 20px; color: var(--ivory,#FDF8F0); }
+  .order-meta { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 12px; color: rgba(242,213,176,0.7); letter-spacing: 0.05em; }
+  .status-pill { padding: 4px 10px; border-radius: 999px; font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; border: 1px solid transparent; }
+  .status-pending { background: rgba(201,144,12,0.15); color: var(--gold-light,#F0C040); border-color: rgba(201,144,12,0.35); }
+  .status-confirmed { background: rgba(27,107,61,0.2); color: #80F2A0; border-color: rgba(27,107,61,0.4); }
+  .status-stitching { background: rgba(113,84,190,0.2); color: #C3A8FF; border-color: rgba(113,84,190,0.4); }
+  .status-ready { background: rgba(70,150,200,0.2); color: #9ED8FF; border-color: rgba(70,150,200,0.4); }
+  .status-shipped { background: rgba(236,128,46,0.2); color: #FFC08A; border-color: rgba(236,128,46,0.4); }
+  .status-delivered { background: rgba(27,107,61,0.3); color: #8EF0A8; border-color: rgba(27,107,61,0.5); }
+  .status-cancelled { background: rgba(139,26,26,0.2); color: #F2A0A0; border-color: rgba(139,26,26,0.4); }
+  .orders-empty { padding: 16px; text-align: center; color: rgba(242,213,176,0.6); border: 1px dashed rgba(201,144,12,0.2); border-radius: 12px; }
   .wa-followup a:hover { background: #1FAD54; }
 
   .overlay-actions { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -1199,11 +1218,26 @@
     padding: 8px 12px; font-size: 11px; letter-spacing: 0.08em;
     color: var(--blush);
   }
+  .account-sidebar { display: flex; flex-direction: column; gap: 18px; }
+  .account-identity { display: flex; flex-direction: column; gap: 8px; }
+  .account-hint { font-size: 12px; color: rgba(242,213,176,0.6); letter-spacing: 0.08em; }
+  .account-actions { display: flex; flex-direction: column; gap: 10px; }
+  .account-actions .modal-submit,
+  .account-actions .btn-outline,
+  .account-actions .link-btn { width: 100%; justify-content: center; }
   .link-btn {
     background: none; border: none; color: var(--gold-light);
     font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
     cursor: none;
   }
+  #accountOverlay.open { justify-content: flex-end; }
+  #accountOverlay { align-items: stretch; }
+  .account-modal.account-side {
+    max-width: 420px; height: 100vh; max-height: none;
+    margin: 0 0 0 auto; border-radius: 0;
+    padding: 48px 36px; transform: translateX(24px);
+  }
+  #accountOverlay.open .account-modal.account-side { transform: translateX(0); }
 
   .cart-list { display: flex; flex-direction: column; gap: 12px; }
   .cart-item {
@@ -1323,37 +1357,92 @@
 
 <!-- ACCOUNT MODAL -->
 <div class="modal-overlay" id="accountOverlay" onclick="handleAccountOverlayClick(event)">
-  <div class="modal modal-wide">
-    <button class="modal-close" onclick="closeAccount()">???</button>
+  <div class="modal modal-wide account-modal" id="accountModal">
+    <button class="modal-close" onclick="closeAccount()">X</button>
     <div class="modal-eyebrow">Account</div>
-    <h2 class="modal-title">Sign In or <em style="color:var(--gold-light,#F0C040);font-style:italic;">Register</em></h2>
+    <h2 class="modal-title" id="accountTitle">Sign In or <em style="color:var(--gold-light,#F0C040);font-style:italic;">Register</em></h2>
 
-    <div class="auth-tabs">
-      <button class="modal-tab active" id="tabLogin" onclick="switchAuthTab('login')">Sign In</button>
-      <button class="modal-tab" id="tabRegister" onclick="switchAuthTab('register')">Register</button>
-    </div>
-
-    <div id="formLogin" class="modal-form auth-form">
-      <input type="email" id="login-email" placeholder="Email *" required>
-      <input type="password" id="login-password" placeholder="Password *" required>
-      <button class="modal-submit" onclick="submitLogin()">Sign In</button>
-    </div>
-
-    <div id="formRegister" class="modal-form auth-form" style="display:none;">
-      <div class="auth-row">
-        <input type="text" id="reg-name" placeholder="Full Name *" required>
-        <input type="tel" id="reg-phone" placeholder="Phone (optional)">
+    <div id="authSection">
+      <div class="auth-tabs">
+        <button class="modal-tab active" id="tabLogin" onclick="switchAuthTab('login')">Sign In</button>
+        <button class="modal-tab" id="tabRegister" onclick="switchAuthTab('register')">Register</button>
       </div>
-      <input type="email" id="reg-email" placeholder="Email *" required>
-      <input type="password" id="reg-password" placeholder="Password (min 6 chars) *" required>
-      <input type="text" id="reg-address" placeholder="Address (optional)">
-      <button class="modal-submit" onclick="submitRegister()">Create Account</button>
+
+      <div id="formLogin" class="modal-form auth-form">
+        <input type="email" id="login-email" placeholder="Email *" required>
+        <input type="password" id="login-password" placeholder="Password *" required>
+        <button class="modal-submit" onclick="submitLogin()">Sign In</button>
+      </div>
+
+      <div id="formRegister" class="modal-form auth-form" style="display:none;">
+        <div class="auth-row">
+          <input type="text" id="reg-name" placeholder="Full Name *" required>
+          <input type="tel" id="reg-phone" placeholder="Phone (optional)">
+        </div>
+        <input type="email" id="reg-email" placeholder="Email *" required>
+        <input type="password" id="reg-password" placeholder="Password (min 6 chars) *" required>
+        <input type="text" id="reg-address" placeholder="Address (optional)">
+        <button class="modal-submit" onclick="submitRegister()">Create Account</button>
+      </div>
+
+      <div class="modal-feedback" id="auth-feedback"></div>
     </div>
 
-    <div class="modal-feedback" id="auth-feedback"></div>
-    <div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
-      <div class="account-pill" id="accountStatus">Not signed in</div>
-      <button class="link-btn" id="logoutBtn" onclick="logout()" style="display:none;">Sign Out</button>
+    <div id="accountSidebar" class="account-sidebar" style="display:none;">
+      <div class="account-identity">
+        <div class="account-pill" id="accountStatus">Not signed in</div>
+        <div class="account-hint">Manage details, addresses, and order updates.</div>
+      </div>
+      <div class="account-actions">
+        <button class="modal-submit" onclick="openProfile()">My Profile</button>
+        <button class="btn-outline" type="button" onclick="openProfile('orders')">My Orders</button>
+        <button class="btn-outline" type="button" onclick="openCart()">View Cart</button>
+        <button class="link-btn" id="logoutBtn" onclick="logout()">Sign Out</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- PROFILE MODAL -->
+<div class="modal-overlay" id="profileOverlay" onclick="handleProfileOverlayClick(event)">
+  <div class="modal modal-wide profile-modal">
+    <button class="modal-close" onclick="closeProfile()">?</button>
+    <div class="modal-eyebrow">My Account</div>
+    <h2 class="modal-title">Profile & <em style="color:var(--gold-light,#F0C040);font-style:italic;">Orders</em></h2>
+
+    <div class="modal-tabs profile-tabs">
+      <button class="modal-tab active" id="tabProfile" onclick="switchProfileTab('profile')">Profile</button>
+      <button class="modal-tab" id="tabOrders" onclick="switchProfileTab('orders')">Orders</button>
+    </div>
+
+    <div id="profilePanel" class="modal-form">
+      <div class="form-row">
+        <input type="text" id="profile-name" placeholder="Full Name *">
+        <input type="email" id="profile-email" placeholder="Email" disabled>
+      </div>
+      <div class="form-row">
+        <input type="tel" id="profile-phone" placeholder="Phone (10-digit)">
+        <select id="profile-payment">
+          <option value="">Preferred Payment</option>
+          <option value="COD">Cash on Delivery</option>
+          <option value="UPI">UPI</option>
+          <option value="Bank Transfer">Bank Transfer</option>
+          <option value="Card">Card</option>
+        </select>
+      </div>
+      <textarea id="profile-address" rows="3" placeholder="Address"></textarea>
+      <button class="modal-submit" onclick="saveProfile()">Save Profile</button>
+      <div class="modal-feedback" id="profile-feedback"></div>
+    </div>
+
+    <div id="ordersPanel" class="profile-orders" style="display:none;">
+      <div class="orders-header">
+        <div class="orders-title">Recent Orders</div>
+        <button class="btn-outline" type="button" onclick="loadMyOrders()">Refresh</button>
+      </div>
+      <div id="ordersList" class="orders-list"></div>
+      <div class="modal-feedback" id="orders-feedback"></div>
     </div>
   </div>
 </div>
@@ -1361,7 +1450,7 @@
 <!-- CART MODAL -->
 <div class="modal-overlay" id="cartOverlay" onclick="handleCartOverlayClick(event)">
   <div class="modal modal-wide">
-    <button class="modal-close" onclick="closeCart()">???</button>
+    <button class="modal-close" onclick="closeCart()">X</button>
     <div class="modal-eyebrow">Your Cart</div>
     <h2 class="modal-title">Items <em style="color:var(--gold-light,#F0C040);font-style:italic;">Saved</em></h2>
     <div id="cartList" class="cart-list"></div>
@@ -1383,10 +1472,13 @@ let currentProduct = '';
 let currentTab = 'enquiry';
 let currentUser = null;
 let cartCount = 0;
+const ACCOUNT_TITLE_GUEST = "Sign In or <em style=\"color:var(--gold-light,#F0C040);font-style:italic;\">Register</em>";
+const ACCOUNT_TITLE_USER = "My <em style=\"color:var(--gold-light,#F0C040);font-style:italic;\">Account</em>";
+
 
 // ── Modal ──
 function updateBodyLock() {
-  const ids = ['modalOverlay','accountOverlay','cartOverlay'];
+  const ids = ['modalOverlay','accountOverlay','profileOverlay','cartOverlay'];
   const anyOpen = ids.some(id => {
     const el = document.getElementById(id);
     return el && el.classList.contains('open');
@@ -1557,12 +1649,161 @@ async function submitOrder() {
 function openAccount(tab = 'login') {
   document.getElementById('accountOverlay').classList.add('open');
   updateBodyLock();
-  switchAuthTab(tab);
+  if (currentUser) {
+    updateAccountUI();
+  } else {
+    switchAuthTab(tab);
+  }
 }
 
 function closeAccount() {
   document.getElementById('accountOverlay').classList.remove('open');
   updateBodyLock();
+}
+
+function openProfile(tab = 'profile') {
+  if (!currentUser) { openAccount('login'); return; }
+  closeAccount();
+  document.getElementById('profileOverlay').classList.add('open');
+  updateBodyLock();
+  switchProfileTab(tab);
+  loadProfile();
+}
+
+function closeProfile() {
+  document.getElementById('profileOverlay').classList.remove('open');
+  updateBodyLock();
+}
+
+function handleProfileOverlayClick(e) {
+  if (e.target === document.getElementById('profileOverlay')) closeProfile();
+}
+
+function switchProfileTab(tab) {
+  const tabProfile = document.getElementById('tabProfile');
+  const tabOrders = document.getElementById('tabOrders');
+  const panelProfile = document.getElementById('profilePanel');
+  const panelOrders = document.getElementById('ordersPanel');
+  if (tab === 'orders') {
+    if (tabProfile) tabProfile.classList.remove('active');
+    if (tabOrders) tabOrders.classList.add('active');
+    if (panelProfile) panelProfile.style.display = 'none';
+    if (panelOrders) panelOrders.style.display = 'flex';
+    loadMyOrders();
+  } else {
+    if (tabOrders) tabOrders.classList.remove('active');
+    if (tabProfile) tabProfile.classList.add('active');
+    if (panelOrders) panelOrders.style.display = 'none';
+    if (panelProfile) panelProfile.style.display = 'flex';
+  }
+}
+
+function fillProfileForm(user) {
+  if (!user) return;
+  const name = document.getElementById('profile-name');
+  const email = document.getElementById('profile-email');
+  const phone = document.getElementById('profile-phone');
+  const address = document.getElementById('profile-address');
+  const payment = document.getElementById('profile-payment');
+  if (name) name.value = user.name || '';
+  if (email) email.value = user.email || '';
+  if (phone) phone.value = user.phone || '';
+  if (address) address.value = user.address || '';
+  if (payment) payment.value = user.payment_mode || '';
+}
+
+async function loadProfile() {
+  try {
+    const res = await fetch('/api/profile');
+    if (res.ok) {
+      const data = await res.json();
+      currentUser = data.user || currentUser;
+      updateAccountUI();
+      fillProfileForm(data.user);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function saveProfile() {
+  const name = document.getElementById('profile-name').value.trim();
+  const phone = document.getElementById('profile-phone').value.trim();
+  const address = document.getElementById('profile-address').value.trim();
+  const payment_mode = document.getElementById('profile-payment').value;
+  if (!name) { setFeedback('profile-feedback','Name is required','error'); return; }
+  const btn = document.querySelector('#profilePanel .modal-submit');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    const res = await fetch('/api/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, phone, address, payment_mode })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      currentUser = data.user || currentUser;
+      updateAccountUI();
+      fillProfileForm(data.user);
+      setFeedback('profile-feedback','Profile updated','success');
+    } else {
+      setFeedback('profile-feedback', data.error || 'Update failed', 'error');
+    }
+  } catch (e) {
+    setFeedback('profile-feedback', 'Network error. Please try again.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save Profile';
+  }
+}
+
+function statusMeta(status) {
+  const raw = (status || 'pending').toLowerCase();
+  const clean = raw.replace(/[^a-z]/g, '') || 'pending';
+  const label = raw.charAt(0).toUpperCase() + raw.slice(1);
+  return { cls: 'status-' + clean, label };
+}
+
+async function loadMyOrders() {
+  const list = document.getElementById('ordersList');
+  if (list) list.innerHTML = '<div class="orders-empty">Loading orders?</div>';
+  try {
+    const res = await fetch('/api/orders/mine');
+    const data = await res.json();
+    if (!res.ok) {
+      setFeedback('orders-feedback', data.error || 'Unable to load orders', 'error');
+      if (list) list.innerHTML = '';
+      return;
+    }
+    const orders = data.orders || [];
+    if (!orders.length) {
+      if (list) list.innerHTML = '<div class="orders-empty">No orders yet. Your upcoming orders will appear here.</div>';
+      return;
+    }
+    const html = orders.map(o => {
+      const meta = [];
+      if (o.size) meta.push(`Size: ${o.size}`);
+      if (o.fabric_choice) meta.push(`Fabric: ${o.fabric_choice}`);
+      if (o.color_choice) meta.push(`Color: ${o.color_choice}`);
+      if (o.payment_method) meta.push(`Payment: ${o.payment_method}`);
+      if (o.total_amount) meta.push(`Total: ${o.total_amount}`);
+      if (o.created_at) meta.push(`Placed: ${o.created_at}`);
+      const status = statusMeta(o.status);
+      const metaHtml = meta.map(m => `<span>${escapeHtml(m)}</span>`).join('');
+      return `
+        <div class="order-card">
+          <div class="order-header">
+            <div class="order-title">${escapeHtml(o.product_name || 'Order')}</div>
+            <span class="status-pill ${status.cls}">${escapeHtml(status.label)}</span>
+          </div>
+          <div class="order-meta">
+            <span>#${o.id}</span>
+            ${metaHtml}
+          </div>
+        </div>
+      `;
+    }).join('');
+    if (list) list.innerHTML = html;
+  } catch (e) {
+    if (list) list.innerHTML = '<div class="orders-empty">Network error. Please try again.</div>';
+  }
 }
 
 function handleAccountOverlayClick(e) {
@@ -1582,6 +1823,15 @@ function updateAccountUI() {
   const accountLink = document.getElementById('accountLink');
   const status = document.getElementById('accountStatus');
   const logoutBtn = document.getElementById('logoutBtn');
+  const authSection = document.getElementById('authSection');
+  const sidebar = document.getElementById('accountSidebar');
+  const title = document.getElementById('accountTitle');
+  const accountModal = document.getElementById('accountModal');
+  const showSidebar = !!currentUser;
+  if (authSection) authSection.style.display = showSidebar ? 'none' : 'block';
+  if (sidebar) sidebar.style.display = showSidebar ? 'flex' : 'none';
+  if (title) title.innerHTML = showSidebar ? ACCOUNT_TITLE_USER : ACCOUNT_TITLE_GUEST;
+  if (accountModal) accountModal.classList.toggle('account-side', showSidebar);
   if (currentUser) {
     const first = (currentUser.name || 'Account').split(' ')[0];
     if (accountLink) accountLink.textContent = 'Hi, ' + first;
@@ -1680,6 +1930,7 @@ async function logout() {
   currentUser = null;
   updateAccountUI();
   refreshCartCount();
+  closeProfile();
   toast('Signed out');
 }
 
