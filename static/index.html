@@ -388,6 +388,18 @@
     z-index: 2;
     text-transform: uppercase;
   }
+  .product-card.no-image .product-bg { background-image: none !important; background: linear-gradient(160deg, #3A1A0B 0%, #1A0F0A 55%, #0C0705 100%); }
+  .product-card.no-image .product-meta {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center;
+    background: linear-gradient(180deg, rgba(10,6,4,0.6) 0%, rgba(10,6,4,0.9) 100%);
+  }
+  .product-card.no-image .product-name { font-size: 22px; }
+  .product-card.no-image .product-line,
+  .product-card.no-image .product-note,
+  .product-card.no-image .product-ornament { display: none; }
   .featured-empty { grid-column: 1 / -1; text-align: center; color: rgba(242,213,176,0.7); font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; padding: 18px 0; }
   .debug-panel { grid-column: 1 / -1; background: rgba(20,12,8,0.6); border: 1px dashed rgba(201,144,12,0.4); padding: 12px 14px; font-size: 11px; color: var(--blush); line-height: 1.5; }
   .debug-panel code { color: var(--gold-light); }
@@ -2138,7 +2150,7 @@ async function loadFeaturedCollection() {
     const res = await fetch('/api/public/products');
     if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    const featured = data.featured || [];
+    const featured = Array.isArray(data.featured) ? data.featured : [];
     const source = featured.length ? featured : (data.products || []);
     const dbg = document.getElementById('featuredDebug');
     if (dbg) {
@@ -2149,23 +2161,18 @@ async function loadFeaturedCollection() {
         <div>Featured products: <code>${featured.length}</code></div>
         <div>Source IDs: <code>${ids || 'none'}</code></div>`;
     }
-    const posterOnly = (source || []).filter(p => {
-      const img = (p.image || '').toLowerCase();
-      if (img.includes('/poster') || img.includes('poster.')) return true;
-      const imgs = Array.isArray(p.images) ? p.images : [];
-      return imgs.some(u => (u || '').toLowerCase().includes('/poster') || (u || '').toLowerCase().includes('poster.'));
-    });
-    const items = posterOnly.slice(0, 5);
+    const items = (source || []).slice(0, 5);
     if (!items.length) return;
     grid.innerHTML = items.map((p, i) => {
       const label = (p.style || p.category || 'Signature').toUpperCase();
       const code = p.product_id || '';
+      const baseIsPoster = u => ((u || '').split('/').pop() || '').toLowerCase().startsWith('poster');
       const imgs = Array.isArray(p.images) ? p.images : [];
-      const posterImg = imgs.find(u => (u || '').toLowerCase().includes('/poster') || (u || '').toLowerCase().includes('poster.'));
+      const posterImg = imgs.find(u => baseIsPoster(u));
       const img = posterImg || p.image || '';
       const delay = (i * 0.05).toFixed(2);
       return `
-      <article class="product-card reveal" style="transition-delay:${delay}s" onclick="goToProduct('${code}')">
+      <article class="product-card reveal visible ${img ? '' : 'no-image'}" style="transition-delay:${delay}s" onclick="goToProduct('${code}')">
         <div class="product-image">
           <div class="product-bg" style="background-image:url('${img}')"></div>
           <div class="product-overlay"></div>
