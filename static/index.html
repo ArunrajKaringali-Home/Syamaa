@@ -603,6 +603,41 @@
     .footer-bottom { flex-direction: column; gap: 20px; text-align: center; }
     .scroll-indicator { display: none; }
     .custom-banner { grid-template-columns: 1fr; padding: 50px 28px; gap: 36px; }
+
+    /* Mobile nav open state */
+    nav.nav-open .nav-links {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      position: absolute;
+      top: 100%;
+      left: 0; right: 0;
+      background: rgba(26,15,10,0.98);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid rgba(201,144,12,0.2);
+      padding: 16px 0 24px;
+    }
+    nav.nav-open .nav-links li {
+      border-bottom: 1px solid rgba(201,144,12,0.07);
+    }
+    nav.nav-open .nav-links li:last-child {
+      border-bottom: none;
+      padding: 16px 28px 0;
+    }
+    nav.nav-open .nav-links a {
+      display: block;
+      padding: 14px 28px;
+      font-size: 12px;
+    }
+    nav.nav-open .nav-links .nav-cta {
+      display: inline-block;
+      margin: 0;
+    }
+
+    /* Hamburger → X animation */
+    nav.nav-open .menu-toggle span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+    nav.nav-open .menu-toggle span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+    nav.nav-open .menu-toggle span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
   }
 </style>
 </head>
@@ -632,10 +667,18 @@
     <li><a href="#" id="cartLink" onclick="openCart();return false;">Cart <span class="nav-badge" id="cartCount">0</span></a></li>
     <li><a href="https://wa.me/916282201008" class="nav-cta">Order Now</a></li>
   </ul>
-  <button class="menu-toggle" aria-label="Menu">
+  <button class="menu-toggle" aria-label="Menu" onclick="this.closest('nav').classList.toggle('nav-open')">
     <span></span><span></span><span></span>
   </button>
 </nav>
+<script>
+  // Close mobile nav when a link is clicked
+  document.querySelectorAll('.nav-links a').forEach(function(link) {
+    link.addEventListener('click', function() {
+      document.querySelector('nav').classList.remove('nav-open');
+    });
+  });
+</script>
 
 <!-- HERO -->
 <section class="hero">
