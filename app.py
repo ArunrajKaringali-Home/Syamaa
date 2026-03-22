@@ -225,9 +225,7 @@ def init_db():
     for row in rows:
         if not row["product_id"]:
             code = f"SYA{row['id']:04d}"
-            db.execute(
-                "UPDATE products SET product_id=? WHERE id=?", (code, row["id"])
-            )
+            db.execute("UPDATE products SET product_id=? WHERE id=?", (code, row["id"]))
         if not row["status"]:
             db.execute("UPDATE products SET status='active' WHERE id=?", (row["id"],))
         if row["stock_qty"] is None:
@@ -385,8 +383,10 @@ def get_product(pid):
 @app.route("/api/public/products", methods=["GET"])
 def public_products():
     products, _ = build_products_from_images()
+
     def is_featured(value):
         return str(value).strip().lower() in ("1", "true", "yes", "on")
+
     featured = [p for p in products if is_featured(p.get("featured"))]
     return jsonify({"products": products, "featured": featured})
 
@@ -806,9 +806,7 @@ def add_to_cart():
     )
     if existing:
         new_qty = existing["quantity"] + quantity
-        query(
-            "UPDATE cart_items SET quantity=? WHERE id=?", (new_qty, existing["id"])
-        )
+        query("UPDATE cart_items SET quantity=? WHERE id=?", (new_qty, existing["id"]))
         return jsonify(
             {"success": True, "message": "Cart updated ✦", "action": "updated"}
         )
@@ -857,9 +855,7 @@ def update_cart_item(item_id):
     if quantity is not None:
         if int(quantity) < 1:
             return jsonify({"error": "Quantity must be at least 1"}), 400
-        query(
-            "UPDATE cart_items SET quantity=? WHERE id=?", (int(quantity), item_id)
-        )
+        query("UPDATE cart_items SET quantity=? WHERE id=?", (int(quantity), item_id))
     if size is not None:
         query("UPDATE cart_items SET size=? WHERE id=?", (size, item_id))
     if notes is not None:
@@ -1104,7 +1100,6 @@ def admin_products():
     return jsonify({"products": products})
 
 
-
 @app.route("/admin/api/products", methods=["POST"])
 @admin_required
 def admin_add_product():
@@ -1163,9 +1158,7 @@ def admin_add_product():
 @admin_required
 def admin_update_product(pid):
     data = request.get_json(silent=True) or {}
-    existing = query(
-        "SELECT id, product_id FROM products WHERE id=?", (pid,), one=True
-    )
+    existing = query("SELECT id, product_id FROM products WHERE id=?", (pid,), one=True)
     if not existing:
         return jsonify({"error": "Product not found"}), 404
     existing_pid = product_code(existing.get("product_id"))
@@ -1242,7 +1235,6 @@ def admin_update_product(pid):
     if product_id:
         ensure_product_folder(product_id)
     return jsonify({"success": True})
-
 
 
 @app.route("/admin/api/products/<int:pid>", methods=["DELETE"])
@@ -1333,6 +1325,7 @@ IMAGE_ROOT = BASE_DIR / "instance" / "images"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _image_cache = {"mtime": 0, "file_count": 0, "by_id": {}}
 
+
 def ensure_product_folder(product_id):
     if not product_id:
         return
@@ -1340,7 +1333,6 @@ def ensure_product_folder(product_id):
         (IMAGE_ROOT / product_id).mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
-
 
 
 def scan_image_library():
@@ -1560,9 +1552,9 @@ PRODUCT_DETAIL_HTML = """
   .brand { font-family:'Cormorant Garamond',serif; font-size:36px; color:var(--gold-light); letter-spacing:1px; }
   .breadcrumbs { font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:rgba(242,213,176,0.7); }
   .content { display:grid; grid-template-columns:1.1fr 0.9fr; gap:36px; }
-  .gallery-main { width:100%; border-radius:22px; border:1px solid rgba(201,144,12,0.3); aspect-ratio:3/4; object-fit:cover; background:#1A0F0A; transition: opacity 0.25s ease; }
-  .thumbs { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:14px; overflow-x:auto; }
-  .thumbs img { width:100%; border-radius:14px; aspect-ratio:3/4; object-fit:cover; cursor:pointer; border:1px solid transparent; }
+  .gallery-main { width:100%; border-radius:22px; border:1px solid rgba(201,144,12,0.3); aspect-ratio:unset; max-height:600px; object-fit:contain; background:#1A0F0A; transition:opacity 0.25s ease; }
+  .thumbs { display:flex !important; flex-wrap:wrap; gap:12px; margin-top:14px; align-items:flex-start; }
+  .thumbs img { max-height:100px; width:auto !important; max-width:none !important; min-width:0 !important; height:100px; display:block; border-radius:14px; cursor:pointer; border:1px solid transparent; flex:0 0 auto; object-fit:contain; background:#1A0F0A; }
   .thumbs img.active { border-color:rgba(201,144,12,0.7); }
   .zoom { overflow:hidden; border-radius:22px; }
   .zoom img { transition:transform 0.4s ease; }
