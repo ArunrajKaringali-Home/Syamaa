@@ -1564,6 +1564,9 @@ PRODUCT_DETAIL_HTML = """
   .price { margin-top:14px; font-size:16px; color:var(--gold-light); letter-spacing:0.15em; text-transform:uppercase; }
   .chips { margin-top:18px; display:flex; gap:10px; flex-wrap:wrap; }
   .chip { border:1px solid rgba(201,144,12,0.3); padding:6px 10px; border-radius:999px; font-size:11px; letter-spacing:0.15em; text-transform:uppercase; }
+  .stock-badge { padding:6px 12px; border-radius:4px; font-size:11px; letter-spacing:0.15em; text-transform:uppercase; font-weight:600; flex-basis:100%; max-width:fit-content; }
+  .stock-badge.in-stock { background:#22C55E; color:#FFFFFF; }
+  .stock-badge.out-of-stock { background:#DC2626; color:#FFFFFF; }
   .desc { margin-top:18px; line-height:1.7; color:rgba(242,213,176,0.7); }
   .actions { margin-top:22px; display:flex; gap:12px; flex-wrap:wrap; }
   .btn { padding:12px 18px; border-radius:999px; text-transform:uppercase; letter-spacing:0.2em; font-size:11px; border:1px solid rgba(201,144,12,0.4); }
@@ -1641,8 +1644,7 @@ PRODUCT_DETAIL_HTML = """
           <span>ID: {{ display_id }}</span>
           <span>{{ product.category }}</span>
           <span>{{ product.style }}</span>
-          <span>{{ 'In Stock' if (product.stock_qty or 0) > 0 else 'Out of Stock' }}</span>
-        </div>
+          <div><span class="stock-badge{% if (product.stock_qty or 0) > 0 %} in-stock{% else %} out-of-stock{% endif %}">{{ 'In Stock' if (product.stock_qty or 0) > 0 else 'Out of Stock' }}</span></div></div>
         <div class="price">{{ product.price or 'Contact for Price' }}</div>
         <div class="chips">
           {% if product.fabric %}<span class="chip">{{ product.fabric }}</span>{% endif %}
@@ -1734,12 +1736,12 @@ PRODUCT_DETAIL_HTML = """
               <div class="select-field">
                 <select id="ord-size" required>
                   <option value="">Select Size</option>
-                  <option>XS</option>
-                  <option>S</option>
-                  <option>M</option>
-                  <option>L</option>
-                  <option>XL</option>
-                  <option>XXL</option>
+                  <option>XS (32)</option>
+                  <option>S (34)</option>
+                  <option>M (36)</option>
+                  <option>L (38)</option>
+                  <option>XL (40)</option>
+                  <option>XXL (42)</option>
                   <option>Custom</option>
                 </select>
               </div>
@@ -1779,9 +1781,10 @@ PRODUCT_DETAIL_HTML = """
               <label class="field-label" for="ord-pay">Payment Method</label>
               <div class="select-field">
                 <select id="ord-pay">
-                  <option value="COD">Cash on Delivery</option>
-                  <option value="UPI">UPI</option>
+                  <option value="COD">Cash on Delivery (COD)</option>
+                  <option value="UPI">UPI / GPay / PhonePe</option>
                   <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="Card">Credit / Debit Card</option>
                 </select>
               </div>
             </div>
